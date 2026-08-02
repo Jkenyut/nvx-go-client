@@ -1,0 +1,62 @@
+version: "2"
+run:
+  timeout: 5m
+  tests: false
+
+linters:
+  default: none
+  enable:
+    # 1. Core Linters (Required for all standards)
+    - errcheck
+    - govet
+    - staticcheck
+
+    # 2. Strict Style Guide Standard
+    # Strictly emphasizes proper error handling, naming conventions, and panic avoidance
+    - errorlint # Prevents incorrect error wrapping
+    - errname # Standardized error naming
+    - nilerr # Prevents returning nil when an error occurs
+    - revive # Primary linter for coding style (strictly configured below)
+    - gocritic # Enforces code best practices (strictly configured below)
+    - bodyclose # Enforces closing HTTP bodies
+    - prealloc # Slice pre-allocation
+
+    # 3. Code Cleanliness
+    - ineffassign
+    - unused
+    - whitespace
+
+  settings:
+    govet:
+      enable:
+        - shadow
+
+    revive:
+      severity: warning
+      rules:
+        - name: receiver-naming # Avoid using 'this', 'self', or 'me'
+        - name: error-naming # Use ErrXxx or errXxx
+        - name: error-strings # Error strings should be lowercase
+        - name: exported # Documentation is mandatory for public APIs
+        - name: time-naming # Time variables must have explicit units
+        - name: unexported-return # Do not return unexported types from public functions
+        - name: empty-block # Avoid empty blocks
+        - name: context-as-argument # Context must be the first parameter
+        - name: indent-error-flow # Early return for error flow (avoid else nesting)
+
+    gocritic:
+      enabled-tags:
+        - performance
+        - style
+        - experimental
+      disabled-checks:
+        - wrapperFunc
+
+formatters:
+  enable:
+    - gofumpt
+    - gofmt
+    - goimports
+  settings:
+    gofumpt:
+      extra-rules: true

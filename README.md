@@ -8,7 +8,7 @@ It provides seamless integration for distributed tracing, metric generation, and
 
 - **Built on Resty**: Inherits all the powerful features of `resty.Client` (retries, timeouts, easy marshaling/unmarshaling, etc.).
 - **Automatic OpenTelemetry Instrumentation**: Automatically injects trace headers and records metrics for all outgoing HTTP requests.
-- **Flexible Configuration**: Safe functional options pattern (`ClientOption`) ensures that custom transports and configurations do not overwrite the tracing instrumentation.
+- **Flexible Configuration**: Safe functional options pattern (`Option`) ensures that custom transports and configurations do not overwrite the tracing instrumentation.
 
 ## Installation
 
@@ -27,14 +27,22 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"time"
 
+	"github.com/go-resty/resty/v2"
 	"github/nvx-go-client"
 )
 
 func main() {
 	// 1. Initialize the client
-	// You can pass optional ClientOptions here.
-	c := client.NewClient()
+	// Use WithResty to safely configure the underlying resty client
+	c := client.NewClient(
+		client.WithResty(func(r *resty.Client) {
+			r.SetBaseURL("https://jsonplaceholder.typicode.com").
+				SetTimeout(10 * time.Second).
+				SetRetryCount(3)
+		}),
+	)
 
 	// 2. Make a request
 	// IMPORTANT: Always pass a context to your request using SetContext()
@@ -43,7 +51,7 @@ func main() {
 
 	resp, err := c.R().
 		SetContext(ctx).
-		Get("https://jsonplaceholder.typicode.com/todos/1")
+		Get("/todos/1")
 
 	if err != nil {
 		log.Fatalf("Request failed: %v", err)
@@ -56,4 +64,4 @@ func main() {
 
 ## Under the Hood
 
-When you call `NewClient()`, it initializes a new `resty.Client`. After applying any custom `ClientOption` functions you provide, it safely wraps the final `http.Transport` with `otelhttp.NewTransport`. This ensures that all outgoing requests are automatically instrumented for observability, regardless of any custom connection pooling or timeout settings you may have configured.
+When you call `NewClient()`, it initializes a new `resty.Client`. After applying any custom `Option` functions you provide, it safely wraps the final `http.Transport` with `otelhttp.NewTransport`. This ensures that all outgoing requests are automatically instrumented for observability, regardless of any custom connection pooling or timeout settings you may have configured.

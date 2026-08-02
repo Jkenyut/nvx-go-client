@@ -12,11 +12,19 @@ type Client struct {
 	*resty.Client
 }
 
-// ClientOption is a function for configuring the client.
-type ClientOption func(*Client)
+// Option is a function for configuring the client.
+type Option func(*Client)
+
+// WithResty allows configuring the underlying resty client safely
+// before OpenTelemetry instrumentation is applied.
+func WithResty(configure func(*resty.Client)) Option {
+	return func(c *Client) {
+		configure(c.Client)
+	}
+}
 
 // NewClient creates a new instance of Client with OpenTelemetry instrumentation.
-func NewClient(opts ...ClientOption) *Client {
+func NewClient(opts ...Option) *Client {
 	r := resty.New()
 
 	c := &Client{
