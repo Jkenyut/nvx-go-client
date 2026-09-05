@@ -25,23 +25,38 @@ const (
 // Client is a wrapper around resty.Client that is automatically instrumented with OpenTelemetry.
 type Client struct {
 	*resty.Client
-	otelOpts []otelhttp.Option
+	otelOpts  []otelhttp.Option
+	cbManager *CircuitBreakerManager
 }
 
 // Option is a function for configuring the client.
 type Option func(*Client)
 
-// SetTransport sets the HTTP transport for the client and ensures it is wrapped with OpenTelemetry instrumentation.
-// This prevents callers from accidentally stripping distributed tracing when applying custom transports.
+// CircuitBreakerManager returns the CircuitBreakerManager instance if circuit breaking is enabled, or nil.
+func (c *Client) CircuitBreakerManager() *CircuitBreakerManager {
+	return c.cbManager
+}
+
+// SetTransport sets the HTTP transport for the client and ensures it is wrapped with OpenTelemetry instrumentation
+// and any configured dynamic Circuit Breaker.
 func (c *Client) SetTransport(transport http.RoundTripper) *Client {
 	if transport == nil {
 		transport = defaultTransport()
 	}
+
+	var otelTransport http.RoundTripper
 	if ot, ok := transport.(*otelhttp.Transport); ok {
-		c.Client.SetTransport(ot)
-		return c
+		otelTransport = ot
+	} else {
+		otelTransport = otelhttp.NewTransport(transport, c.otelOpts...)
 	}
-	c.Client.SetTransport(otelhttp.NewTransport(transport, c.otelOpts...))
+
+	finalTransport := otelTransport
+	if c.cbManager != nil {
+		finalTransport = newCircuitBreakerTransport(otelTransport, c.cbManager)
+	}
+
+	c.Client.SetTransport(finalTransport)
 	return c
 }
 
@@ -80,6 +95,13 @@ func WithTransport(transport http.RoundTripper) Option {
 func WithOTelOptions(opts ...otelhttp.Option) Option {
 	return func(c *Client) {
 		c.otelOpts = append(c.otelOpts, opts...)
+	}
+}
+
+// WithCircuitBreaker enables dynamic route-aware circuit breaking using sony/gobreaker/v2.
+func WithCircuitBreaker(opts ...CircuitBreakerOption) Option {
+	return func(c *Client) {
+		c.cbManager = NewCircuitBreakerManager(opts...)
 	}
 }
 

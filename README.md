@@ -16,11 +16,14 @@ It delivers seamless distributed tracing, metric generation, and W3C context pro
 - [Installation](#installation)
 - [Quick Start](#quick-start)
 - [Advanced Usage](#advanced-usage)
+  - [Dynamic Route-Based Circuit Breaker (`sony/gobreaker/v2`)](#dynamic-route-based-circuit-breaker-sonygobreakerv2)
   - [Custom OpenTelemetry Options](#custom-opentelemetry-options)
   - [Advanced Resty Configuration](#advanced-resty-configuration)
   - [Custom Transport & mTLS](#custom-transport--mtls)
 - [Available Options](#available-options)
 - [Under the Hood & Architecture](#under-the-hood--architecture)
+  - [Dynamic Route Normalization & Cardinality Protection](#dynamic-route-normalization--cardinality-protection)
+  - [Enterprise Circuit Breaker Calibration](#enterprise-circuit-breaker-calibration)
   - [Connection Pooling Defaults](#connection-pooling-defaults)
   - [Foolproof OpenTelemetry Invariant](#foolproof-opentelemetry-invariant)
 - [Testing & Quality Gates](#testing--quality-gates)
@@ -33,9 +36,10 @@ It delivers seamless distributed tracing, metric generation, and W3C context pro
 
 - **Built on Resty**: Inherits the complete feature set of `resty.Client` (automatic retries, timeouts, JSON/XML unmarshaling, middleware, and request chaining).
 - **Automatic OpenTelemetry Instrumentation**: Transparently injects W3C `traceparent` headers and records client spans and metrics for all outgoing HTTP requests.
+- **Dynamic Route-Aware Circuit Breaker**: Powered by `sony/gobreaker/v2`. Automatically isolates circuit breakers per endpoint, collapses dynamic path parameters (numeric IDs, UUIDs, ObjectIDs, ULIDs), strips query strings, and fails fast on downstream outages without cardinality explosion.
 - **Foolproof Instrumentation Guarantee**: Even if a custom `http.RoundTripper` is configured via options or updated post-instantiation via `c.SetTransport()`, OpenTelemetry wrapping is always preserved.
 - **Enterprise Connection Pooling**: Clones `http.DefaultTransport` with high-throughput defaults (`MaxIdleConns: 100`, `MaxIdleConnsPerHost: 20`, `IdleConnTimeout: 90s`), eliminating the notorious Go standard library 2-connection bottleneck.
-- **Ergonomic Functional Options**: Clean, direct options like `WithTimeout`, `WithBaseURL`, `WithRetry`, `WithTransport`, and `WithOTelOptions` eliminate closure boilerplate.
+- **Ergonomic Functional Options**: Clean, direct options like `WithTimeout`, `WithBaseURL`, `WithRetry`, `WithCircuitBreaker`, and `WithOTelOptions` eliminate closure boilerplate.
 - **Resilient Defaults**: Enforces a 30-second default request timeout to prevent uncancelled network calls from hanging indefinitely.
 
 ---
@@ -91,6 +95,58 @@ func main() {
 ---
 
 ## Advanced Usage
+
+### Dynamic Route-Based Circuit Breaker (`sony/gobreaker/v2`)
+
+Enable automatic route-aware circuit breaking to protect your services from cascading outages and thundering-herd effects:
+
+```go
+package main
+
+import (
+	"context"
+	"errors"
+	"time"
+
+	"github/nvx-go-client"
+)
+
+func main() {
+	c := client.New(
+		client.WithBaseURL("https://api.payment.internal"),
+		client.WithCircuitBreaker(
+			client.WithCBTimeout(30 * time.Second), // Sleep duration in Open state
+			client.WithCBMaxRequests(3),            // Trial requests in Half-Open state
+		),
+	)
+
+	ctx := context.Background()
+
+	// Dynamic URLs (/orders/12345, /orders/67890) and queries (?page=1)
+	// are automatically collapsed into the canonical route:
+	// "GET api.payment.internal/orders/{param}"
+	resp, err := c.R().
+		SetContext(ctx).
+		Get("/orders/12345?notify=true")
+
+	if errors.Is(err, client.ErrCircuitOpen) {
+		// Fail-fast: The downstream service is degraded.
+		// The request was aborted immediately without any network I/O.
+		return
+	}
+}
+```
+
+#### Explicit Route Pattern Override
+If your endpoint contains dynamic string slugs that heuristics cannot safely detect (e.g., usernames `/users/johndoe`), bind an explicit route pattern to the request context:
+
+```go
+ctx := client.WithRoutePattern(context.Background(), "/users/{username}")
+
+resp, err := c.R().
+	SetContext(ctx).
+	Get("/users/johndoe")
+```
 
 ### Custom OpenTelemetry Options
 
@@ -158,6 +214,9 @@ Even with custom transports, OpenTelemetry tracing is **automatically applied an
 | `client.WithTimeout(d)` | Sets the default request timeout for all requests. | `30s` |
 | `client.WithBaseURL(url)` | Sets the target service base URL. | `""` |
 | `client.WithRetry(count, wait)` | Configures automatic retry count and backoff wait time. | `0`, `0s` |
+| `client.WithCircuitBreaker(opts...)` | Enables dynamic route-aware circuit breaking (`sony/gobreaker/v2`). | Disabled |
+| `client.WithCBIsFailure(fn)` | Customizes error and HTTP status classification for circuit breaking. | `5xx` & network errors |
+| `client.WithRoutePattern(ctx, pat)` | Binds an explicit route pattern (e.g. `/users/{username}`) to context. | None |
 | `client.WithTransport(rt)` | Configures a custom `http.RoundTripper` before OpenTelemetry wrapping. | Cloned `http.DefaultTransport` |
 | `client.WithOTelOptions(opts...)` | Passes custom OpenTelemetry `otelhttp.Option` configurations. | None |
 | `client.WithResty(fn)` | Arbitrary configuration callback on the underlying `*resty.Client`. | `nil` |
@@ -165,6 +224,28 @@ Even with custom transports, OpenTelemetry tracing is **automatically applied an
 ---
 
 ## Under the Hood & Architecture
+
+### Dynamic Route Normalization & Cardinality Protection
+
+Dynamic circuit breaking groups requests by canonical route key (`METHOD Host/normalized_path`) instead of raw URLs:
+
+1. **Query Stripping**: URLs like `/api/v1/users?page=1&sort=desc` are truncated to `/api/v1/users`.
+2. **Path Parameter Detection**: Individual path segments are analyzed and dynamic identifiers are collapsed to `{param}` with zero regex overhead and a single allocation:
+   - **Numeric IDs** (`/users/12345/orders/6789`) $\rightarrow$ `/users/{param}/orders/{param}`
+   - **UUIDs** (`/items/550e8400-e29b-41d4-a716-446655440000`) $\rightarrow$ `/items/{param}`
+   - **Mongo ObjectIDs & Hex Hashes** (`/docs/507f1f77bcf86cd799439011`) $\rightarrow$ `/docs/{param}`
+   - **ULIDs / KSUIDs** (`/events/01ARZ3NDEKTSV4RRFFQ69G5FAV`) $\rightarrow$ `/events/{param}`
+3. **Hardened Bounded Registry Guard**: In-memory circuit breakers are capped (`MaxBreakers: 1000` by default). When capacity is reached, healthy `StateClosed` breakers are pruned first, ensuring that `StateOpen` and `StateHalfOpen` breakers actively protecting failing backends are never prematurely wiped (preventing reset attacks).
+
+### Enterprise Circuit Breaker Calibration
+
+- **`ReadyToTrip` Gate**: Requires at least 10 requests (`Requests >= 10`) within the rolling 30s window to avoid tripping during cold start or low-traffic anomalies.
+- **Fail-Fast**: Trips to `Open` when failure rate $\ge 50\%$ or 5 consecutive failures occur.
+- **Error Classification**:
+  - **`5xx` & Network Timeouts**: Counted as **Failures**.
+  - **`4xx` (e.g. `400`, `401`, `404`)**: Counted as **Successes** from the breaker's perspective, because the upstream server is healthy and responding. This prevents malformed client requests from tripping circuit breakers for all other users.
+  - **`context.Canceled`**: Excluded from counts (client disconnects do not penalize upstream health).
+  - **Customizable Classification**: Supply `WithCBIsFailure(fn)` to easily customize classification (e.g., treating `429 Too Many Requests` or specific errors as failures).
 
 ### Connection Pooling Defaults
 
@@ -215,6 +296,15 @@ go test -run=^$ -bench=. -benchmem ./...
 golangci-lint run ./...
 govulncheck ./...
 ```
+
+### Benchmark Results (Apple M4)
+
+| Benchmark | Latency | Memory | Heap Allocs | Notes |
+| :--- | :--- | :--- | :--- | :--- |
+| `BenchmarkNormalizePath` | **140 ns/op** | 96 B/op | **1 alloc/op** | Zero regex, single allocation byte scanning |
+| `BenchmarkCircuitBreaker_AllowedRequest` | **33.8 µs/op** | 13.3 KB/op | 124 allocs/op | Full roundtrip + OTel spans + Circuit Breaker |
+| `BenchmarkClient_Request` | **31.9 µs/op** | 13.2 KB/op | 121 allocs/op | Baseline HTTP roundtrip + OTel spans |
+| **Circuit Breaker Net Overhead** | **+1.9 µs/op** | **+180 B/op** | **+3 allocs/op** | Negligible impact on real network throughput |
 
 ---
 
