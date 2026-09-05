@@ -1,4 +1,4 @@
-module github/nvx-go-client
+module github.com/Jkenyut/nvx-go-client
 
 go 1.26.5
 
