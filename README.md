@@ -148,6 +148,48 @@ resp, err := c.R().
 	Get("/users/johndoe")
 ```
 
+### Outbound Audit Logging (`log/slog` Agnostic Integration)
+
+Seamlessly emit structured enterprise outbound audit logs via Go standard library `log/slog` with automatic context extraction (from `nvx-go-helper/activity` or custom hooks), text payload masking, body size limits, and multipart/binary exclusion:
+
+```go
+package main
+
+import (
+	"context"
+	"log/slog"
+	"os"
+
+	"github.com/Jkenyut/nvx-go-client"
+)
+
+func main() {
+	// Any standard slog.Logger (JSON, text, or third-party handler)
+	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
+
+	c := client.New(
+		client.WithBaseURL("https://api.partner.com"),
+		client.WithAudit(client.AuditConfig{
+			Logger:                   logger, // Defaults to slog.Default() if nil
+			ServiceName:              "checkout-service",
+			LogRequestBodies:         true,  // Log text request bodies (JSON/Form)
+			LogResponseBodies:        true,  // Log text response bodies
+			RequestBodyLogLimitSize:  3 * 1024 * 1024, // 3MB limit
+			ResponseBodyLogLimitSize: 5 * 1024 * 1024, // 5MB limit
+			MaskKeywords:             []string{"custom_token", "tax_number"},
+			// Context attributes (transaction_id, request_id, user_id, user_ip, user_ip_origin)
+			// are automatically extracted from nvx-go-helper/activity or HTTP headers.
+			// You can also supply a custom ContextAttrs hook:
+			// ContextAttrs: func(ctx context.Context) []slog.Attr { ... },
+		}),
+	)
+
+	// Context metadata injected by activity package or HTTP headers
+	// is automatically captured into structured slog attributes!
+	_, _ = c.R().SetContext(ctx).SetBody(payload).Post("/v1/charge")
+}
+```
+
 ### Custom OpenTelemetry Options
 
 You can pass custom `otelhttp.Option` values directly via `WithOTelOptions` (e.g., custom span name formatters, custom `TracerProvider`, or client trace filters):

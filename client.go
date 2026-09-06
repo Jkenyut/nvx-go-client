@@ -27,6 +27,7 @@ type Client struct {
 	*resty.Client
 	otelOpts  []otelhttp.Option
 	cbManager *CircuitBreakerManager
+	auditCfg  *AuditConfig
 }
 
 // Option is a function for configuring the client.
@@ -35,6 +36,11 @@ type Option func(*Client)
 // CircuitBreakerManager returns the CircuitBreakerManager instance if circuit breaking is enabled, or nil.
 func (c *Client) CircuitBreakerManager() *CircuitBreakerManager {
 	return c.cbManager
+}
+
+// AuditConfig returns the configured AuditConfig, or nil if audit logging is not enabled.
+func (c *Client) AuditConfig() *AuditConfig {
+	return c.auditCfg
 }
 
 // SetTransport sets the HTTP transport for the client and ensures it is wrapped with OpenTelemetry instrumentation
@@ -102,6 +108,16 @@ func WithOTelOptions(opts ...otelhttp.Option) Option {
 func WithCircuitBreaker(opts ...CircuitBreakerOption) Option {
 	return func(c *Client) {
 		c.cbManager = NewCircuitBreakerManager(opts...)
+	}
+}
+
+// WithAudit enables outbound audit logging, emitting structured request and response records via log/slog.
+//
+//nolint:gocritic // hugeParam: intentional ergonomic by-value option pattern
+func WithAudit(cfg AuditConfig) Option {
+	return func(c *Client) {
+		c.auditCfg = applyAuditDefaults(&cfg)
+		setupAuditHooks(c.Client, c.auditCfg)
 	}
 }
 
