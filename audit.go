@@ -220,6 +220,103 @@ func applyAuditDefaults(cfg *AuditConfig) *AuditConfig {
 	return &cloned
 }
 
+// AuditOption is a functional option for customizing AuditConfig.
+type AuditOption func(*AuditConfig)
+
+// WithAuditLogger sets the slog.Logger used to emit audit records.
+func WithAuditLogger(logger *slog.Logger) AuditOption {
+	return func(cfg *AuditConfig) {
+		cfg.Logger = logger
+	}
+}
+
+// WithAuditLevels sets the log levels for successful (< 400) and failed (>= 400 / network errors) requests.
+func WithAuditLevels(level, errorLevel slog.Level) AuditOption {
+	return func(cfg *AuditConfig) {
+		cfg.Level = level
+		cfg.ErrorLevel = errorLevel
+	}
+}
+
+// WithAuditMessage sets the message string for audit log entries.
+func WithAuditMessage(message string) AuditOption {
+	return func(cfg *AuditConfig) {
+		cfg.Message = message
+	}
+}
+
+// WithAuditServiceName sets the service name attribute in audit log entries.
+func WithAuditServiceName(serviceName string) AuditOption {
+	return func(cfg *AuditConfig) {
+		cfg.ServiceName = serviceName
+	}
+}
+
+// WithAuditBodyLogging enables or disables logging for request and response bodies.
+func WithAuditBodyLogging(request, response bool) AuditOption {
+	return func(cfg *AuditConfig) {
+		cfg.LogRequestBodies = request
+		cfg.LogResponseBodies = response
+	}
+}
+
+// WithAuditBodyLimits sets maximum byte size limits for request and response body logging.
+// Non-positive limits will default to DefaultRequestBodyLogLimitSize / DefaultResponseBodyLogLimitSize.
+func WithAuditBodyLimits(reqLimitBytes, respLimitBytes int64) AuditOption {
+	return func(cfg *AuditConfig) {
+		if reqLimitBytes > 0 {
+			cfg.RequestBodyLogLimitSize = reqLimitBytes
+		}
+		if respLimitBytes > 0 {
+			cfg.ResponseBodyLogLimitSize = respLimitBytes
+		}
+	}
+}
+
+// WithAuditMaskKeywords appends custom keywords to mask in headers and JSON/text bodies.
+func WithAuditMaskKeywords(keywords ...string) AuditOption {
+	return func(cfg *AuditConfig) {
+		cfg.MaskKeywords = append(cfg.MaskKeywords, keywords...)
+	}
+}
+
+// WithAuditHeaders sets custom header names for fallback metadata extraction.
+//
+//nolint:gocritic // hugeParam: intentional ergonomic by-value option pattern
+func WithAuditHeaders(headers HeaderKeys) AuditOption {
+	return func(cfg *AuditConfig) {
+		cfg.Headers = headers
+	}
+}
+
+// WithAuditHeadersToRemove specifies header names to completely drop from logged request and response headers.
+func WithAuditHeadersToRemove(headers ...string) AuditOption {
+	return func(cfg *AuditConfig) {
+		cfg.HeadersToRemove = append(cfg.HeadersToRemove, headers...)
+	}
+}
+
+// WithAuditOmitSensitiveHeaders configures whether sensitive headers are dropped entirely instead of masked.
+func WithAuditOmitSensitiveHeaders(omit bool) AuditOption {
+	return func(cfg *AuditConfig) {
+		cfg.OmitSensitiveHeaders = omit
+	}
+}
+
+// WithAuditContextAttrs sets a custom attribute extraction hook from context.Context.
+func WithAuditContextAttrs(fn func(ctx context.Context) []slog.Attr) AuditOption {
+	return func(cfg *AuditConfig) {
+		cfg.ContextAttrs = fn
+	}
+}
+
+// WithAuditIDGenerator sets a custom ID generator for fallback request IDs.
+func WithAuditIDGenerator(fn func() string) AuditOption {
+	return func(cfg *AuditConfig) {
+		cfg.IDGenerator = fn
+	}
+}
+
 type (
 	auditStartTimeKey struct{}
 	auditRecordedKey  struct{}

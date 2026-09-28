@@ -802,3 +802,80 @@ func TestWithAudit_NilSafetyAndHelpers(t *testing.T) {
 		CreatedAt:   time.Now().UTC(),
 	}
 }
+
+func TestAuditOptions(t *testing.T) {
+	handler := &recordingHandler{}
+	logger := slog.New(handler)
+
+	cfg := &AuditConfig{}
+	opts := []AuditOption{
+		WithAuditLogger(logger),
+		WithAuditLevels(slog.LevelDebug, slog.LevelWarn),
+		WithAuditMessage("custom audit msg"),
+		WithAuditServiceName("user-service"),
+		WithAuditBodyLogging(true, true),
+		WithAuditBodyLimits(1024, 2048),
+		WithAuditMaskKeywords("my_secret", "ssn"),
+		WithAuditHeaders(HeaderKeys{
+			RequestID: "X-Trace-Id",
+		}),
+		WithAuditHeadersToRemove("X-Internal-Token"),
+		WithAuditOmitSensitiveHeaders(true),
+		WithAuditContextAttrs(func(ctx context.Context) []slog.Attr {
+			return []slog.Attr{slog.String("tenant", "acme")}
+		}),
+		WithAuditIDGenerator(func() string {
+			return "fixed-id-123"
+		}),
+	}
+
+	for _, opt := range opts {
+		opt(cfg)
+	}
+
+	if cfg.Logger != logger {
+		t.Errorf("expected custom logger")
+	}
+	if cfg.Level != slog.LevelDebug || cfg.ErrorLevel != slog.LevelWarn {
+		t.Errorf("expected level debug and error level warn, got %v and %v", cfg.Level, cfg.ErrorLevel)
+	}
+	if cfg.Message != "custom audit msg" {
+		t.Errorf("expected custom audit msg, got %q", cfg.Message)
+	}
+	if cfg.ServiceName != "user-service" {
+		t.Errorf("expected user-service, got %q", cfg.ServiceName)
+	}
+	if !cfg.LogRequestBodies || !cfg.LogResponseBodies {
+		t.Errorf("expected body logging enabled")
+	}
+	if cfg.RequestBodyLogLimitSize != 1024 || cfg.ResponseBodyLogLimitSize != 2048 {
+		t.Errorf("expected body limits 1024/2048, got %d/%d", cfg.RequestBodyLogLimitSize, cfg.ResponseBodyLogLimitSize)
+	}
+	if len(cfg.MaskKeywords) != 2 || cfg.MaskKeywords[0] != "my_secret" {
+		t.Errorf("expected mask keywords, got %v", cfg.MaskKeywords)
+	}
+	if cfg.Headers.RequestID != "X-Trace-Id" {
+		t.Errorf("expected X-Trace-Id, got %q", cfg.Headers.RequestID)
+	}
+	if len(cfg.HeadersToRemove) != 1 || cfg.HeadersToRemove[0] != "X-Internal-Token" {
+		t.Errorf("expected HeadersToRemove, got %v", cfg.HeadersToRemove)
+	}
+	if !cfg.OmitSensitiveHeaders {
+		t.Errorf("expected OmitSensitiveHeaders to be true")
+	}
+	if cfg.ContextAttrs == nil || len(cfg.ContextAttrs(context.Background())) != 1 {
+		t.Errorf("expected ContextAttrs hook")
+	}
+	if cfg.IDGenerator == nil || cfg.IDGenerator() != "fixed-id-123" {
+		t.Errorf("expected IDGenerator fixed-id-123")
+	}
+
+	// Test applyAuditDefaults with AuditOptions merged
+	finalCfg := applyAuditDefaults(cfg)
+	if finalCfg == nil {
+		t.Fatal("expected non-nil finalCfg")
+	}
+	if finalCfg.RequestBodyLogLimitSize != 1024 {
+		t.Errorf("expected preserved request limit 1024, got %d", finalCfg.RequestBodyLogLimitSize)
+	}
+}

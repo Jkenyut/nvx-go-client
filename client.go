@@ -73,6 +73,15 @@ func WithTimeout(timeout time.Duration) Option {
 	}
 }
 
+// WithTimeoutMS sets the default request timeout in milliseconds.
+func WithTimeoutMS(ms int64) Option {
+	return func(c *Client) {
+		if ms > 0 {
+			c.SetTimeout(time.Duration(ms) * time.Millisecond)
+		}
+	}
+}
+
 // WithBaseURL sets the base URL for the client.
 func WithBaseURL(baseURL string) Option {
 	return func(c *Client) {
@@ -86,6 +95,16 @@ func WithRetry(count int, waitTime time.Duration) Option {
 		c.SetRetryCount(count)
 		if waitTime > 0 {
 			c.SetRetryWaitTime(waitTime)
+		}
+	}
+}
+
+// WithRetryMS configures the client's retry count and optional retry wait time in milliseconds.
+func WithRetryMS(count int, waitTimeMS int64) Option {
+	return func(c *Client) {
+		c.SetRetryCount(count)
+		if waitTimeMS > 0 {
+			c.SetRetryWaitTime(time.Duration(waitTimeMS) * time.Millisecond)
 		}
 	}
 }
@@ -119,6 +138,17 @@ func WithAudit(cfg AuditConfig) Option {
 		c.auditCfg = applyAuditDefaults(&cfg)
 		setupAuditHooks(c.Client, c.auditCfg)
 	}
+}
+
+// WithAuditConfig enables outbound audit logging configured via functional AuditOptions.
+func WithAuditConfig(opts ...AuditOption) Option {
+	var cfg AuditConfig
+	for _, opt := range opts {
+		if opt != nil {
+			opt(&cfg)
+		}
+	}
+	return WithAudit(cfg)
 }
 
 // WithResty allows configuring the underlying resty client safely

@@ -62,10 +62,28 @@ func WithCBInterval(interval time.Duration) CircuitBreakerOption {
 	}
 }
 
+// WithCBIntervalMS sets the cyclic duration of the closed state in milliseconds.
+func WithCBIntervalMS(ms int64) CircuitBreakerOption {
+	return func(cfg *CircuitBreakerConfig) {
+		if ms > 0 {
+			cfg.Interval = time.Duration(ms) * time.Millisecond
+		}
+	}
+}
+
 // WithCBTimeout sets the cooldown duration in open state before transitioning to half-open.
 func WithCBTimeout(timeout time.Duration) CircuitBreakerOption {
 	return func(cfg *CircuitBreakerConfig) {
 		cfg.Timeout = timeout
+	}
+}
+
+// WithCBTimeoutMS sets the cooldown duration in open state before transitioning to half-open in milliseconds.
+func WithCBTimeoutMS(ms int64) CircuitBreakerOption {
+	return func(cfg *CircuitBreakerConfig) {
+		if ms > 0 {
+			cfg.Timeout = time.Duration(ms) * time.Millisecond
+		}
 	}
 }
 

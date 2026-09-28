@@ -17,13 +17,20 @@ It delivers seamless distributed tracing, metric generation, and W3C context pro
 - [Quick Start](#quick-start)
 - [Advanced Usage](#advanced-usage)
   - [Dynamic Route-Based Circuit Breaker (`sony/gobreaker/v2`)](#dynamic-route-based-circuit-breaker-sonygobreakerv2)
+  - [Outbound Audit Logging (`log/slog` Agnostic Integration)](#outbound-audit-logging-logslog-agnostic-integration)
   - [Custom OpenTelemetry Options](#custom-opentelemetry-options)
   - [Advanced Resty Configuration](#advanced-resty-configuration)
   - [Custom Transport & mTLS](#custom-transport--mtls)
 - [Available Options](#available-options)
+  - [Client Options](#client-options)
+  - [Circuit Breaker Options](#circuit-breaker-options-withcircuitbreaker)
+  - [Audit Options](#audit-options-withauditconfig)
 - [Under the Hood & Architecture](#under-the-hood--architecture)
+  - [High-Level Architecture Diagram](#high-level-architecture)
+  - [Outbound Request Lifecycle Diagram](#outbound-request-lifecycle)
   - [Dynamic Route Normalization & Cardinality Protection](#dynamic-route-normalization--cardinality-protection)
   - [Enterprise Circuit Breaker Calibration](#enterprise-circuit-breaker-calibration)
+
   - [Connection Pooling Defaults](#connection-pooling-defaults)
   - [Foolproof OpenTelemetry Invariant](#foolproof-opentelemetry-invariant)
 - [Testing & Quality Gates](#testing--quality-gates)
@@ -150,8 +157,25 @@ resp, err := c.R().
 
 ### Outbound Audit Logging (`log/slog` Agnostic Integration)
 
-Seamlessly emit structured enterprise outbound audit logs via Go standard library `log/slog` with automatic context extraction (from `nvx-go-helper/activity` or custom hooks), text payload masking, body size limits, and multipart/binary exclusion:
+Seamlessly emit structured enterprise outbound audit logs via Go standard library `log/slog` with automatic context extraction (from `nvx-go-helper/activity` or custom hooks), text payload masking, body size limits, and multipart/binary exclusion.
 
+You can configure audit logging either using a configuration struct or modular functional options:
+
+#### Using Functional Options (`WithAuditConfig`):
+```go
+c := client.New(
+	client.WithBaseURL("https://api.partner.com"),
+	client.WithAuditConfig(
+		client.WithAuditLogger(slog.Default()),
+		client.WithAuditServiceName("checkout-service"),
+		client.WithAuditBodyLogging(true, true),
+		client.WithAuditBodyLimits(3*1024*1024, 5*1024*1024), // 3MB req, 5MB resp
+		client.WithAuditMaskKeywords("custom_token", "tax_number"),
+	),
+)
+```
+
+#### Using Configuration Struct (`WithAudit`):
 ```go
 package main
 
@@ -251,23 +275,130 @@ Even with custom transports, OpenTelemetry tracing is **automatically applied an
 
 ## Available Options
 
+### Client Options
+
 | Option | Description | Default |
 | :--- | :--- | :--- |
-| `client.WithTimeout(d)` | Sets the default request timeout for all requests. | `30s` |
+| `client.WithTimeout(d)` | Sets default request timeout (`time.Duration`). | `30s` |
+| `client.WithTimeoutMS(ms)` | Sets default request timeout in milliseconds (`int64`). | `30000ms` |
 | `client.WithBaseURL(url)` | Sets the target service base URL. | `""` |
-| `client.WithRetry(count, wait)` | Configures automatic retry count and backoff wait time. | `0`, `0s` |
+| `client.WithRetry(count, wait)` | Configures automatic retries and wait duration. | `0`, `0s` |
+| `client.WithRetryMS(count, waitMS)` | Configures automatic retries and wait time in milliseconds (`int64`). | `0`, `0ms` |
 | `client.WithCircuitBreaker(opts...)` | Enables dynamic route-aware circuit breaking (`sony/gobreaker/v2`). | Disabled |
-| `client.WithCBIsFailure(fn)` | Customizes error and HTTP status classification for circuit breaking. | `5xx` & network errors |
-| `client.WithRoutePattern(ctx, pat)` | Binds an explicit route pattern (e.g. `/users/{username}`) to context. | None |
-| `client.WithTransport(rt)` | Configures a custom `http.RoundTripper` before OpenTelemetry wrapping. | Cloned `http.DefaultTransport` |
+| `client.WithAudit(cfg)` | Enables outbound audit logging via `AuditConfig` struct. | Disabled |
+| `client.WithAuditConfig(opts...)` | Enables outbound audit logging via functional `AuditOption` list. | Disabled |
+| `client.WithTransport(rt)` | Configures custom `http.RoundTripper` before OpenTelemetry wrapping. | Cloned `http.DefaultTransport` |
 | `client.WithOTelOptions(opts...)` | Passes custom OpenTelemetry `otelhttp.Option` configurations. | None |
-| `client.WithResty(fn)` | Arbitrary configuration callback on the underlying `*resty.Client`. | `nil` |
+| `client.WithResty(fn)` | Arbitrary configuration callback on underlying `*resty.Client`. | `nil` |
+
+### Circuit Breaker Options (`WithCircuitBreaker`)
+
+| Option | Description | Default |
+| :--- | :--- | :--- |
+| `client.WithCBTimeout(d)` | Cooldown duration in Open state (`time.Duration`). | `30s` |
+| `client.WithCBTimeoutMS(ms)` | Cooldown duration in Open state in milliseconds (`int64`). | `30000ms` |
+| `client.WithCBInterval(d)` | Cyclic duration to clear closed state counts (`time.Duration`). | `30s` |
+| `client.WithCBIntervalMS(ms)` | Cyclic duration to clear closed state in milliseconds (`int64`). | `30000ms` |
+| `client.WithCBMaxRequests(n)` | Max requests allowed through in Half-Open state. | `3` |
+| `client.WithCBMaxBreakers(n)` | Max circuit breakers retained in memory before eviction. | `1000` |
+| `client.WithCBReadyToTrip(fn)` | Custom predicate for tripping to Open state. | $\ge 10$ reqs & ($\ge 50\%$ fail $\lor$ $\ge 5$ consec) |
+| `client.WithCBIsFailure(fn)` | Custom response/error classification predicate. | Network errors & `5xx` |
+| `client.WithCBOnStateChange(fn)` | Callback notification on breaker state change. | `nil` |
+| `client.WithCBRouteKeyFunc(fn)` | Custom route key generator function. | `DefaultRouteKey` |
+| `client.WithRoutePattern(ctx, pat)` | Binds explicit route pattern to request context. | None |
+
+### Audit Options (`WithAuditConfig`)
+
+| Option | Description | Default |
+| :--- | :--- | :--- |
+| `client.WithAuditLogger(logger)` | Configures the `*slog.Logger` instance. | `slog.Default()` |
+| `client.WithAuditLevels(info, err)` | Log levels for success (<400) and failure ($\ge$400 / error). | `slog.LevelInfo`, `slog.LevelError` |
+| `client.WithAuditMessage(msg)` | Message string emitted on audit records. | `"outbound HTTP request"` |
+| `client.WithAuditServiceName(name)`| Service name attribute in audit records. | `""` |
+| `client.WithAuditBodyLogging(req, resp)` | Enables request/response body capture. | `false`, `false` |
+| `client.WithAuditBodyLimits(req, resp)` | Max byte limits for request and response bodies. | `3MB`, `5MB` |
+| `client.WithAuditMaskKeywords(kw...)` | Additional field keywords to mask. | Default keywords list |
+| `client.WithAuditHeaders(keys)` | Custom header names for fallback metadata extraction. | `DefaultHeaderKeys()` |
+| `client.WithAuditHeadersToRemove(hdrs...)` | Headers to completely drop from logged headers. | None |
+| `client.WithAuditOmitSensitiveHeaders(b)` | Drops sensitive headers instead of masking. | `false` |
+| `client.WithAuditContextAttrs(fn)` | Custom hook to extract `slog.Attr` from context. | `activity.ToSlogAttrs` fallback |
+| `client.WithAuditIDGenerator(fn)` | Custom fallback ID generator. | UUID v7 |
+
 
 ---
 
 ## Under the Hood & Architecture
 
+### High-Level Architecture
+
+```mermaid
+graph TD
+    UserCode["Application Code"] -->|"c.R().SetContext(ctx).Get(url)"| RestyClient["*resty.Client Wrapper"]
+    
+    subgraph ClientPipeline["Outbound Request Pipeline"]
+        RestyClient -->|"1. OnBeforeRequest"| AuditHookPre["Audit Hook (Start Timer, Context Init)"]
+        AuditHookPre -->|"2. RoundTrip()"| CBTransport["Circuit Breaker RoundTripper"]
+        
+        subgraph CircuitBreakerCore["Dynamic Circuit Breaker Layer"]
+            CBTransport --> RouteNorm["Dynamic Route Key Normalization"]
+            RouteNorm --> CBMgr["Circuit Breaker Registry (Bounded Cache)"]
+            CBMgr --> StateCheck{"State Open?"}
+            StateCheck -->|"Yes (Tripped)"| ErrOpen["Return ErrCircuitOpen (Fail Fast)"]
+        end
+        
+        StateCheck -->|"No (Closed/Half-Open)"| OTelTransport["OpenTelemetry Transport (otelhttp)"]
+        
+        subgraph NetworkLayer["HTTP Transport & Network"]
+            OTelTransport -->|"Inject W3C traceparent"| HTTPTransport["Tuned http.Transport (MaxIdle: 100/20)"]
+            HTTPTransport -->|"Wire I/O"| RemoteService["Remote HTTP Endpoint"]
+            RemoteService -->|"Wire Response"| HTTPTransport
+        end
+        
+        HTTPTransport -->|"Return Response / Err"| OTelTransport
+        OTelTransport -->|"Record Spans & Metrics"| CBTransport
+        CBTransport -->|"Record Success / Failure Count"| RestyClient
+        RestyClient -->|"3. OnAfterResponse / OnError"| AuditHookPost["Audit Hook (Masking, Size Limit, slog.Log)"]
+    end
+    
+    AuditHookPost -->|"Emit JSON/Text Log"| SlogLogger["log/slog Handler"]
+    AuditHookPost -->|"Return Response to App"| UserCode
+```
+
+### Outbound Request Lifecycle
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor App as Application
+    participant R as Resty Client
+    participant A as Audit Hook
+    participant CB as Circuit Breaker Transport
+    participant OTel as OpenTelemetry Transport
+    participant Wire as Remote HTTP Server
+
+    App->>R: c.R().SetContext(ctx).Post("/v1/payments")
+    R->>A: OnBeforeRequest (Capture start time, init once)
+    R->>CB: RoundTrip(req)
+    CB->>CB: Normalize route (/v1/payments) & check state
+    alt Circuit is OPEN
+        CB-->>R: ErrCircuitOpen (Instant fast-fail without network I/O)
+    else Circuit is CLOSED or HALF-OPEN
+        CB->>OTel: Forward request
+        OTel->>OTel: Start span & inject traceparent header
+        OTel->>Wire: HTTP Request over pooled TCP connection
+        Wire-->>OTel: HTTP Response (e.g. 200 OK)
+        OTel->>OTel: End span & record latency metrics
+        OTel-->>CB: Response
+        CB->>CB: counts.onSuccess() or onFailure()
+        CB-->>R: Response
+    end
+    R->>A: OnAfterResponse (Mask sensitive body/headers, compute latency)
+    A->>A: Emit structured log via log/slog
+    R-->>App: *resty.Response
+```
+
 ### Dynamic Route Normalization & Cardinality Protection
+
 
 Dynamic circuit breaking groups requests by canonical route key (`METHOD Host/normalized_path`) instead of raw URLs:
 
@@ -281,6 +412,20 @@ Dynamic circuit breaking groups requests by canonical route key (`METHOD Host/no
 
 ### Enterprise Circuit Breaker Calibration
 
+```mermaid
+stateDiagram-v2
+    [*] --> Closed: Initial State
+    
+    Closed --> Closed: Request Success / 4xx Status
+    Closed --> Open: Failures >= 50% (min 10 reqs) OR 5 Consec Failures
+    
+    Open --> Open: Rapid Fast-Fail (ErrCircuitOpen)
+    Open --> HalfOpen: Sleep Window Elapsed (Default: 30s)
+    
+    HalfOpen --> Open: Any Failure / 5xx Status
+    HalfOpen --> Closed: MaxRequests Succeeded (Default: 3 reqs)
+```
+
 - **`ReadyToTrip` Gate**: Requires at least 10 requests (`Requests >= 10`) within the rolling 30s window to avoid tripping during cold start or low-traffic anomalies.
 - **Fail-Fast**: Trips to `Open` when failure rate $\ge 50\%$ or 5 consecutive failures occur.
 - **Error Classification**:
@@ -290,6 +435,7 @@ Dynamic circuit breaking groups requests by canonical route key (`METHOD Host/no
   - **Customizable Classification**: Supply `WithCBIsFailure(fn)` to easily customize classification (e.g., treating `429 Too Many Requests` or specific errors as failures).
 
 ### Connection Pooling Defaults
+
 
 By default, Go's `http.DefaultTransport` limits idle connections per host to `2` (`DefaultMaxIdleConnsPerHost = 2`). In high-throughput microservices, concurrent requests to a single upstream service rapidly exceed 2, causing excess connections to be closed immediately and forcing expensive TCP + TLS renegotiations on every request.
 

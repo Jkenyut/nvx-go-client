@@ -415,6 +415,19 @@ func TestCircuitBreaker_OptionsAndDefaults(t *testing.T) {
 		}
 	}
 
+	// Test MS options
+	cMS := New(WithCircuitBreaker(
+		WithCBIntervalMS(1500),
+		WithCBTimeoutMS(2500),
+	))
+	cbmMS := cMS.CircuitBreakerManager()
+	if cbmMS.cfg.Interval != 1500*time.Millisecond {
+		t.Errorf("Expected Interval 1500ms, got %v", cbmMS.cfg.Interval)
+	}
+	if cbmMS.cfg.Timeout != 2500*time.Millisecond {
+		t.Errorf("Expected Timeout 2500ms, got %v", cbmMS.cfg.Timeout)
+	}
+
 	// Test default ReadyToTrip
 	defCfg := defaultCBConfig()
 	// Case 1: Requests < 10 -> returns false

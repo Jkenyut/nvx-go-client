@@ -150,6 +150,54 @@ func TestClient_Options(t *testing.T) {
 		}
 	})
 
+	t.Run("WithTimeoutMS", func(t *testing.T) {
+		timeoutMS := int64(2500)
+		c := New(WithTimeoutMS(timeoutMS))
+		expected := 2500 * time.Millisecond
+		if c.GetClient().Timeout != expected {
+			t.Errorf("Expected timeout %v, got %v", expected, c.GetClient().Timeout)
+		}
+
+		// Non-positive does nothing
+		c2 := New(WithTimeoutMS(0))
+		if c2.GetClient().Timeout != DefaultTimeout {
+			t.Errorf("Expected default timeout %v, got %v", DefaultTimeout, c2.GetClient().Timeout)
+		}
+	})
+
+	t.Run("WithRetryMS", func(t *testing.T) {
+		retryCount := 4
+		retryWaitMS := int64(350)
+		c := New(WithRetryMS(retryCount, retryWaitMS))
+		expectedWait := 350 * time.Millisecond
+		if c.RetryCount != retryCount {
+			t.Errorf("Expected RetryCount %d, got %d", retryCount, c.RetryCount)
+		}
+		if c.RetryWaitTime != expectedWait {
+			t.Errorf("Expected RetryWaitTime %v, got %v", expectedWait, c.RetryWaitTime)
+		}
+	})
+
+	t.Run("WithAuditConfig", func(t *testing.T) {
+		c := New(WithAuditConfig(
+			WithAuditServiceName("test-service"),
+			WithAuditBodyLogging(true, true),
+			WithAuditMessage("custom audit message"),
+		))
+		if c.AuditConfig() == nil {
+			t.Fatal("Expected AuditConfig to be non-nil")
+		}
+		if c.AuditConfig().ServiceName != "test-service" {
+			t.Errorf("Expected ServiceName 'test-service', got %q", c.AuditConfig().ServiceName)
+		}
+		if !c.AuditConfig().LogRequestBodies || !c.AuditConfig().LogResponseBodies {
+			t.Error("Expected request and response body logging to be true")
+		}
+		if c.AuditConfig().Message != "custom audit message" {
+			t.Errorf("Expected Message 'custom audit message', got %q", c.AuditConfig().Message)
+		}
+	})
+
 	t.Run("WithResty", func(t *testing.T) {
 		var invoked bool
 		c := New(WithResty(func(r *resty.Client) {
