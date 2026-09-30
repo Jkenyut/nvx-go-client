@@ -65,7 +65,7 @@ var defaultMaskKeywords = []string{
 // HeaderKeys defines header names extracted into the audit log when context lacks them.
 type HeaderKeys struct {
 	RequestID     string
-	TransactionID string
+	CorrelationID string
 	IP            string
 	IPOrigin      string
 	UserID        string
@@ -75,7 +75,7 @@ type HeaderKeys struct {
 func DefaultHeaderKeys() HeaderKeys {
 	return HeaderKeys{
 		RequestID:     "X-Request-Id",
-		TransactionID: "X-Transaction-Id",
+		CorrelationID: "X-Correlation-Id",
 		IP:            "X-Forwarded-For",
 		IPOrigin:      "X-Ip-Origin",
 		UserID:        "X-User-Id",
@@ -93,7 +93,7 @@ type AuditLog struct {
 	IP              string         `json:"ip,omitempty"`
 	IPOrigin        string         `json:"ip_origin,omitempty"`
 	RequestID       string         `json:"request_id,omitempty"`
-	TransactionID   string         `json:"transaction_id,omitempty"`
+	CorrelationID   string         `json:"correlation_id,omitempty"`
 	RequestHeaders  map[string]any `json:"request_headers,omitempty"`
 	ResponseHeaders map[string]any `json:"response_headers,omitempty"`
 	RequestBody     any            `json:"request_body,omitempty"`
@@ -204,8 +204,8 @@ func applyAuditDefaults(cfg *AuditConfig) *AuditConfig {
 	if cloned.Headers.RequestID == "" {
 		cloned.Headers.RequestID = defHeaders.RequestID
 	}
-	if cloned.Headers.TransactionID == "" {
-		cloned.Headers.TransactionID = defHeaders.TransactionID
+	if cloned.Headers.CorrelationID == "" {
+		cloned.Headers.CorrelationID = defHeaders.CorrelationID
 	}
 	if cloned.Headers.IP == "" {
 		cloned.Headers.IP = defHeaders.IP
@@ -496,7 +496,7 @@ func extractContextAttrs(ctx context.Context, header http.Header, keys *HeaderKe
 
 	for _, a := range actAttrs {
 		switch a.Key {
-		case "transaction_id":
+		case "correlation_id":
 			hasTrx = true
 		case "request_id":
 			hasReq = true
@@ -521,7 +521,7 @@ func extractContextAttrs(ctx context.Context, header http.Header, keys *HeaderKe
 	if !hasTrx {
 		var trxID string
 		if header != nil {
-			trxID = header.Get(keys.TransactionID)
+			trxID = header.Get(keys.CorrelationID)
 		}
 		if trxID == "" {
 			span := trace.SpanFromContext(ctx)
@@ -530,7 +530,7 @@ func extractContextAttrs(ctx context.Context, header http.Header, keys *HeaderKe
 			}
 		}
 		if trxID != "" {
-			attrs = append(attrs, slog.String("transaction_id", trxID))
+			attrs = append(attrs, slog.String("correlation_id", trxID))
 		}
 	}
 

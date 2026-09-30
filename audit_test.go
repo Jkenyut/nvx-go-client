@@ -372,7 +372,7 @@ func TestWithAudit_ContextExtractionAndHeaderFallback(t *testing.T) {
 		)
 
 		ctx := context.Background()
-		ctx = activity.WithTransactionID(ctx, "trx-ctx-999")
+		ctx = activity.WithCorrelationID(ctx, "trx-ctx-999")
 		ctx = activity.WithRequestID(ctx, "req-ctx-888")
 		ctx = activity.WithUserIP(ctx, "10.0.0.1")
 		ctx = activity.WithUserIPOrigin(ctx, "203.0.113.1")
@@ -384,8 +384,8 @@ func TestWithAudit_ContextExtractionAndHeaderFallback(t *testing.T) {
 		}
 
 		rec := handler.lastRecord()
-		if rec.Attrs["transaction_id"] != "trx-ctx-999" {
-			t.Errorf("expected transaction_id 'trx-ctx-999', got %v", rec.Attrs["transaction_id"])
+		if rec.Attrs["correlation_id"] != "trx-ctx-999" {
+			t.Errorf("expected correlation_id 'trx-ctx-999', got %v", rec.Attrs["correlation_id"])
 		}
 		if rec.Attrs["request_id"] != "req-ctx-888" {
 			t.Errorf("expected request_id 'req-ctx-888', got %v", rec.Attrs["request_id"])
@@ -409,7 +409,7 @@ func TestWithAudit_ContextExtractionAndHeaderFallback(t *testing.T) {
 				ServiceName: "context-service",
 				ContextAttrs: func(ctx context.Context) []slog.Attr {
 					return []slog.Attr{
-						slog.String("transaction_id", "trx-custom-999"),
+						slog.String("correlation_id", "trx-custom-999"),
 						slog.String("request_id", "req-custom-888"),
 						slog.String("user_ip", "10.0.0.1"),
 						slog.String("user_ip_origin", "203.0.113.1"),
@@ -425,8 +425,8 @@ func TestWithAudit_ContextExtractionAndHeaderFallback(t *testing.T) {
 		}
 
 		rec := handler.lastRecord()
-		if rec.Attrs["transaction_id"] != "trx-custom-999" {
-			t.Errorf("expected transaction_id 'trx-custom-999', got %v", rec.Attrs["transaction_id"])
+		if rec.Attrs["correlation_id"] != "trx-custom-999" {
+			t.Errorf("expected correlation_id 'trx-custom-999', got %v", rec.Attrs["correlation_id"])
 		}
 		if rec.Attrs["request_id"] != "req-custom-888" {
 			t.Errorf("expected request_id 'req-custom-888', got %v", rec.Attrs["request_id"])
@@ -452,7 +452,7 @@ func TestWithAudit_ContextExtractionAndHeaderFallback(t *testing.T) {
 		)
 
 		_, err := c.R().
-			SetHeader("X-Transaction-Id", "trx-header-111").
+			SetHeader("X-Correlation-Id", "trx-header-111").
 			SetHeader("X-Request-Id", "req-header-222").
 			SetHeader("X-Forwarded-For", "192.168.1.50").
 			SetHeader("X-Ip-Origin", "198.51.100.2").
@@ -463,8 +463,8 @@ func TestWithAudit_ContextExtractionAndHeaderFallback(t *testing.T) {
 		}
 
 		rec := handler.lastRecord()
-		if rec.Attrs["transaction_id"] != "trx-header-111" {
-			t.Errorf("expected transaction_id 'trx-header-111', got %v", rec.Attrs["transaction_id"])
+		if rec.Attrs["correlation_id"] != "trx-header-111" {
+			t.Errorf("expected correlation_id 'trx-header-111', got %v", rec.Attrs["correlation_id"])
 		}
 		if rec.Attrs["request_id"] != "req-header-222" {
 			t.Errorf("expected request_id 'req-header-222', got %v", rec.Attrs["request_id"])
@@ -480,7 +480,7 @@ func TestWithAudit_ContextExtractionAndHeaderFallback(t *testing.T) {
 		}
 	})
 
-	t.Run("Falls back to OpenTelemetry trace ID when transaction_id header is missing", func(t *testing.T) {
+	t.Run("Falls back to OpenTelemetry trace ID when correlation_id header is missing", func(t *testing.T) {
 		tp := sdktrace.NewTracerProvider()
 		otel.SetTracerProvider(tp)
 		tracer := tp.Tracer("test-tracer")
@@ -502,8 +502,8 @@ func TestWithAudit_ContextExtractionAndHeaderFallback(t *testing.T) {
 
 		rec := handler.lastRecord()
 		expectedTraceID := span.SpanContext().TraceID().String()
-		if rec.Attrs["transaction_id"] != expectedTraceID {
-			t.Errorf("expected transaction_id to match OTel trace ID %q, got %v", expectedTraceID, rec.Attrs["transaction_id"])
+		if rec.Attrs["correlation_id"] != expectedTraceID {
+			t.Errorf("expected correlation_id to match OTel trace ID %q, got %v", expectedTraceID, rec.Attrs["correlation_id"])
 		}
 	})
 
