@@ -54,7 +54,7 @@ It delivers seamless distributed tracing, metric generation, and W3C context pro
 ## Installation
 
 ```bash
-go get github/nvx-go-client
+go get github.com/Jkenyut/nvx-go-client
 ```
 
 ---
@@ -70,7 +70,7 @@ import (
 	"log"
 	"time"
 
-	"github/nvx-go-client"
+	"github.com/Jkenyut/nvx-go-client"
 )
 
 func main() {
@@ -115,7 +115,7 @@ import (
 	"errors"
 	"time"
 
-	"github/nvx-go-client"
+	"github.com/Jkenyut/nvx-go-client"
 )
 
 func main() {
@@ -201,7 +201,7 @@ func main() {
 			RequestBodyLogLimitSize:  3 * 1024 * 1024, // 3MB limit
 			ResponseBodyLogLimitSize: 5 * 1024 * 1024, // 5MB limit
 			MaskKeywords:             []string{"custom_token", "tax_number"},
-			// Context attributes (transaction_id, request_id, user_id, user_ip, user_ip_origin)
+			// Context attributes (correlation_id, request_id, user_id, user_ip, user_ip_origin)
 			// are automatically extracted from nvx-go-helper/activity or HTTP headers.
 			// You can also supply a custom ContextAttrs hook:
 			// ContextAttrs: func(ctx context.Context) []slog.Attr { ... },
@@ -222,7 +222,7 @@ You can pass custom `otelhttp.Option` values directly via `WithOTelOptions` (e.g
 import (
 	"net/http"
 
-	"github/nvx-go-client"
+	"github.com/Jkenyut/nvx-go-client"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 )
 
