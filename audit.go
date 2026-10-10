@@ -175,7 +175,7 @@ func applyAuditDefaults(cfg *AuditConfig) *AuditConfig {
 	if cloned.Message == "" {
 		cloned.Message = DefaultAuditMessage
 	}
-	if cloned.ErrorLevel == 0 && cloned.Level >= 0 {
+	if cloned.ErrorLevel == 0 {
 		cloned.ErrorLevel = slog.LevelError
 	}
 	if cloned.IDGenerator == nil {
@@ -694,9 +694,17 @@ func isSensitiveHeader(name string, keywords []string) bool {
 		keywords = defaultMaskKeywords
 	}
 	lower := strings.ToLower(name)
+	lowerNorm := strings.ReplaceAll(lower, "-", "_")
 	for _, kw := range keywords {
 		kwClean := strings.ToLower(strings.TrimSpace(kw))
-		if kwClean != "" && strings.Contains(lower, kwClean) {
+		if kwClean == "" {
+			continue
+		}
+		if strings.Contains(lower, kwClean) {
+			return true
+		}
+		kwNorm := strings.ReplaceAll(kwClean, "-", "_")
+		if strings.Contains(lowerNorm, kwNorm) {
 			return true
 		}
 	}

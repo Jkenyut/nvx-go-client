@@ -9,10 +9,12 @@ import (
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/Jkenyut/nvx-go-helper/activity"
+	"github.com/go-resty/resty/v2"
 	"go.opentelemetry.io/otel"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 )
@@ -877,5 +879,107 @@ func TestAuditOptions(t *testing.T) {
 	}
 	if finalCfg.RequestBodyLogLimitSize != 1024 {
 		t.Errorf("expected preserved request limit 1024, got %d", finalCfg.RequestBodyLogLimitSize)
+	}
+}
+
+func TestNormalizeHeaders_HyphenatedSensitiveHeaders(t *testing.T) {
+	headers := http.Header{
+		"X-Client-Id":      []string{"my-client-id-123"},
+		"X-Session-Id":     []string{"sess-abc-xyz"},
+		"X-Auth-Code":      []string{"code-999"},
+		"X-Private-Key":    []string{"pem-private-key-material"},
+		"X-Tax-Id":         []string{"tax-123456789"},
+		"X-Date-Of-Birth":  []string{"1990-01-01"},
+		"X-National-Id":    []string{"nat-98765"},
+		"X-Custom-Token":   []string{"token-xyz"},
+		"Content-Type":     []string{"application/json"},
+		"X-Correlation-Id": []string{"corr-uuid-1"},
+	}
+
+	normalized := normalizeHeaders(headers, nil, nil, false)
+
+	// Hyphenated variants of snake_case sensitive keywords must be masked
+	sensitiveKeys := []string{
+		"X-Client-Id", "X-Session-Id", "X-Auth-Code", "X-Private-Key",
+		"X-Tax-Id", "X-Date-Of-Birth", "X-National-Id", "X-Custom-Token",
+	}
+	for _, key := range sensitiveKeys {
+		if val, exists := normalized[key]; !exists || val != "******" {
+			t.Errorf("expected header %q to be masked with '******', got: %v", key, val)
+		}
+	}
+
+	// Benign headers must remain unmasked
+	if val := normalized["Content-Type"]; val != "application/json" {
+		t.Errorf("expected Content-Type to remain untouched, got: %v", val)
+	}
+	if val := normalized["X-Correlation-Id"]; val != "corr-uuid-1" {
+		t.Errorf("expected X-Correlation-Id to remain untouched, got: %v", val)
+	}
+}
+
+func TestAuditConfig_LevelDebugDefaultsErrorLevel(t *testing.T) {
+	cfg := applyAuditDefaults(&AuditConfig{
+		Level: slog.LevelDebug,
+	})
+	if cfg.Level != slog.LevelDebug {
+		t.Errorf("expected Level slog.LevelDebug (-4), got %v", cfg.Level)
+	}
+	if cfg.ErrorLevel != slog.LevelError {
+		t.Errorf("expected ErrorLevel to default to slog.LevelError (8), got %v", cfg.ErrorLevel)
+	}
+}
+
+func TestWithAudit_RetryBehavior(t *testing.T) {
+	var attempts atomic.Int64
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		att := attempts.Add(1)
+		if att < 3 {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"result":"success"}`))
+	}))
+	defer ts.Close()
+
+	logger, handler := newTestLogger()
+	c := New(
+		WithBaseURL(ts.URL),
+		WithRetry(3, 10*time.Millisecond),
+		WithResty(func(r *resty.Client) {
+			r.AddRetryCondition(func(resp *resty.Response, err error) bool {
+				return resp != nil && resp.StatusCode() == http.StatusServiceUnavailable
+			})
+		}),
+		WithAudit(AuditConfig{
+			Logger: logger,
+		}),
+	)
+
+	resp, err := c.R().SetContext(context.Background()).Get("/retry-endpoint")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if resp.StatusCode() != http.StatusOK {
+		t.Fatalf("expected final status 200, got: %d", resp.StatusCode())
+	}
+	if attempts.Load() != 3 {
+		t.Fatalf("expected 3 server attempts, got: %d", attempts.Load())
+	}
+
+	// Verify each outbound attempt was audited (two 503 failures, then one 200 success)
+	records := handler.getRecords()
+	if len(records) != 3 {
+		t.Fatalf("expected 3 audit log records for 3 attempts, got %d", len(records))
+	}
+	if records[0].getInt("status_code") != http.StatusServiceUnavailable {
+		t.Errorf("expected attempt 1 status_code 503, got %d", records[0].getInt("status_code"))
+	}
+	if records[1].getInt("status_code") != http.StatusServiceUnavailable {
+		t.Errorf("expected attempt 2 status_code 503, got %d", records[1].getInt("status_code"))
+	}
+	if records[2].getInt("status_code") != http.StatusOK {
+		t.Errorf("expected attempt 3 status_code 200, got %d", records[2].getInt("status_code"))
 	}
 }

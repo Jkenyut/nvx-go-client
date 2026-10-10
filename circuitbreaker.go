@@ -258,10 +258,13 @@ func (t *circuitBreakerTransport) RoundTrip(req *http.Request) (*http.Response, 
 	resp, roundTripErr := t.next.RoundTrip(req)
 	if t.cbm.cfg.IsFailure != nil {
 		if t.cbm.cfg.IsFailure(resp, roundTripErr) {
-			if roundTripErr != nil {
+			switch {
+			case roundTripErr != nil:
 				done(roundTripErr)
-			} else {
+			case resp != nil:
 				done(fmt.Errorf("circuit breaker failure: HTTP %d", resp.StatusCode))
+			default:
+				done(errors.New("circuit breaker failure: nil response"))
 			}
 		} else {
 			done(nil)
@@ -280,7 +283,7 @@ func (t *circuitBreakerTransport) RoundTrip(req *http.Request) (*http.Response, 
 	}
 
 	// Evaluate HTTP status code: 5xx is server failure; 4xx and 2xx/3xx are considered success
-	if resp.StatusCode >= http.StatusInternalServerError {
+	if resp != nil && resp.StatusCode >= http.StatusInternalServerError {
 		done(fmt.Errorf("upstream server error: %d", resp.StatusCode))
 	} else {
 		done(nil)

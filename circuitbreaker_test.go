@@ -642,3 +642,28 @@ func BenchmarkCircuitBreaker_AllowedRequest(b *testing.B) {
 		_, _ = c.R().SetContext(ctx).Get("/users/123")
 	}
 }
+
+type nilResponseRoundTripper struct{}
+
+func (rt *nilResponseRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	return nil, nil
+}
+
+func TestCircuitBreaker_NilResponseFromNextRoundTripper(t *testing.T) {
+	cbm := NewCircuitBreakerManager()
+	transport := newCircuitBreakerTransport(&nilResponseRoundTripper{}, cbm)
+
+	req, err := http.NewRequest(http.MethodGet, "https://api.example.com/test", nil)
+	if err != nil {
+		t.Fatalf("unexpected error creating request: %v", err)
+	}
+
+	// Should not panic on nil response
+	resp, err := transport.RoundTrip(req)
+	if resp != nil {
+		t.Errorf("expected nil response, got %v", resp)
+	}
+	if err != nil {
+		t.Errorf("expected nil error, got %v", err)
+	}
+}
