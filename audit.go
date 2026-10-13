@@ -1,3 +1,4 @@
+// Package client provides an HTTP client with OpenTelemetry tracing, circuit breaking, and audit logging.
 package client
 
 import (
@@ -161,6 +162,14 @@ type AuditConfig struct {
 	// IDGenerator generates unique identifiers (e.g. for request ID fallback).
 	// If nil, defaults to UUID v7.
 	IDGenerator func() string
+
+	// Store is the LogStore used to persist structured audit log entries.
+	// If set, Save is invoked after request execution.
+	Store LogStore
+
+	// LogStoreTimeout sets the maximum duration allowed for Store.Save execution.
+	// Default: 5 seconds.
+	LogStoreTimeout time.Duration
 }
 
 func applyAuditDefaults(cfg *AuditConfig) *AuditConfig {
@@ -187,6 +196,9 @@ func applyAuditDefaults(cfg *AuditConfig) *AuditConfig {
 	}
 	if cloned.ResponseBodyLogLimitSize <= 0 {
 		cloned.ResponseBodyLogLimitSize = DefaultResponseBodyLogLimitSize
+	}
+	if cloned.LogStoreTimeout <= 0 {
+		cloned.LogStoreTimeout = 5 * time.Second
 	}
 
 	// Merge default keywords with custom keywords
@@ -317,6 +329,27 @@ func WithAuditIDGenerator(fn func() string) AuditOption {
 	}
 }
 
+// WithAuditLogStore sets the LogStore used to persist outbound audit log entries.
+func WithAuditLogStore(store LogStore) AuditOption {
+	return func(cfg *AuditConfig) {
+		cfg.Store = store
+	}
+}
+
+// WithAuditStore is an alias for WithAuditLogStore.
+func WithAuditStore(store LogStore) AuditOption {
+	return WithAuditLogStore(store)
+}
+
+// WithAuditLogStoreTimeout sets the maximum duration allowed for Store.Save execution.
+func WithAuditLogStoreTimeout(timeout time.Duration) AuditOption {
+	return func(cfg *AuditConfig) {
+		if timeout > 0 {
+			cfg.LogStoreTimeout = timeout
+		}
+	}
+}
+
 type (
 	auditStartTimeKey struct{}
 	auditRecordedKey  struct{}
@@ -416,8 +449,8 @@ func recordAuditLog(cfg *AuditConfig, req *resty.Request, resp *resty.Response, 
 		level = slog.LevelWarn
 	}
 
-	// Fast path: if logger is disabled for this level, exit immediately before heavy body/header processing
-	if !cfg.Logger.Enabled(ctx, level) {
+	// Fast path: if no custom store is configured and logger is disabled for this level, exit early
+	if cfg.Store == nil && !cfg.Logger.Enabled(ctx, level) {
 		return
 	}
 
@@ -457,9 +490,11 @@ func recordAuditLog(cfg *AuditConfig, req *resty.Request, resp *resty.Response, 
 	contextAttrs := extractContextAttrs(ctx, reqHeader, &cfg.Headers, cfg.ContextAttrs, cfg.IDGenerator)
 	attrs = append(attrs, contextAttrs...)
 
+	reqHeadersNorm := normalizeHeaders(reqHeader, cfg.MaskKeywords, cfg.HeadersToRemove, cfg.OmitSensitiveHeaders)
+
 	// Headers
 	attrs = append(attrs,
-		slog.Any("request_headers", normalizeHeaders(reqHeader, cfg.MaskKeywords, cfg.HeadersToRemove, cfg.OmitSensitiveHeaders)),
+		slog.Any("request_headers", reqHeadersNorm),
 		slog.Any("response_headers", respHeaders),
 	)
 
@@ -475,7 +510,72 @@ func recordAuditLog(cfg *AuditConfig, req *resty.Request, resp *resty.Response, 
 		attrs = append(attrs, slog.String("error", errorMessage))
 	}
 
-	cfg.Logger.LogAttrs(ctx, level, cfg.Message, attrs...)
+	if cfg.Logger.Enabled(ctx, level) {
+		cfg.Logger.LogAttrs(ctx, level, cfg.Message, attrs...)
+	}
+
+	if cfg.Store != nil {
+		var (
+			correlationID string
+			requestID     string
+			ip            string
+			ipOrigin      string
+			createdBy     string
+		)
+		for _, a := range contextAttrs {
+			switch a.Key {
+			case "correlation_id":
+				correlationID = a.Value.String()
+			case "request_id":
+				requestID = a.Value.String()
+			case "user_ip":
+				ip = a.Value.String()
+			case "user_ip_origin":
+				ipOrigin = a.Value.String()
+			case "user_id":
+				createdBy = a.Value.String()
+			}
+		}
+
+		entryID := ""
+		if cfg.IDGenerator != nil {
+			entryID = cfg.IDGenerator()
+		} else {
+			entryID = cryptoutil.V7()
+		}
+
+		entry := &AuditLog{
+			ID:              entryID,
+			Method:          req.Method,
+			FullURL:         resolveFullURL(req),
+			StatusCode:      statusCode,
+			LatencyMS:       latencyMS,
+			IP:              ip,
+			IPOrigin:        ipOrigin,
+			RequestID:       requestID,
+			CorrelationID:   correlationID,
+			RequestHeaders:  reqHeadersNorm,
+			ResponseHeaders: respHeaders,
+			RequestBody:     reqBodyRaw,
+			ResponseBody:    respBodyRaw,
+			CreatedBy:       createdBy,
+			CreatedAt:       startTime,
+			Protocol:        protocol,
+			ServiceName:     cfg.ServiceName,
+			UserAgent:       resolveUserAgent(req),
+			ErrorMessage:    errorMessage,
+		}
+
+		timeout := cfg.LogStoreTimeout
+		if timeout <= 0 {
+			timeout = 5 * time.Second
+		}
+		saveCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), timeout)
+		defer cancel()
+		if err := cfg.Store.Save(saveCtx, entry); err != nil {
+			cfg.Logger.ErrorContext(ctx, "failed to save outbound audit log", "error", err)
+		}
+	}
 }
 
 func extractContextAttrs(ctx context.Context, header http.Header, keys *HeaderKeys, customExtractor func(ctx context.Context) []slog.Attr, idGen func() string) []slog.Attr {

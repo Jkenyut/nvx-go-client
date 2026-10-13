@@ -151,6 +151,18 @@ func WithAuditConfig(opts ...AuditOption) Option {
 	return WithAudit(cfg)
 }
 
+// WithLogStore configures a custom LogStore for outbound audit logging.
+func WithLogStore(store LogStore) Option {
+	return func(c *Client) {
+		if c.auditCfg == nil {
+			c.auditCfg = applyAuditDefaults(&AuditConfig{Store: store})
+			setupAuditHooks(c.Client, c.auditCfg)
+			return
+		}
+		c.auditCfg.Store = store
+	}
+}
+
 // WithResty allows configuring the underlying resty client safely
 // before OpenTelemetry instrumentation is finalized.
 func WithResty(configure func(*resty.Client)) Option {
