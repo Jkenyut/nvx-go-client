@@ -18,6 +18,7 @@ It delivers seamless distributed tracing, metric generation, and W3C context pro
 - [Advanced Usage](#advanced-usage)
   - [Dynamic Route-Based Circuit Breaker (`sony/gobreaker/v2`)](#dynamic-route-based-circuit-breaker-sonygobreakerv2)
   - [Outbound Audit Logging (`log/slog` Agnostic Integration)](#outbound-audit-logging-logslog-agnostic-integration)
+    - [Custom Audit Storage & Multi-Target Dispatching (`LogStore` / `MultiLogStore`)](#custom-audit-storage--multi-target-dispatching-logstore--multilogstore)
   - [Custom OpenTelemetry Options](#custom-opentelemetry-options)
   - [Advanced Resty Configuration](#advanced-resty-configuration)
   - [Custom Transport & mTLS](#custom-transport--mtls)
@@ -214,6 +215,31 @@ func main() {
 }
 ```
 
+#### Custom Audit Storage & Multi-Target Dispatching (`LogStore` / `MultiLogStore`)
+
+Just like `nvx-go-middleware`, `nvx-go-client` supports pluggable audit stores via the `LogStore` interface (`Save(ctx context.Context, entry *client.AuditLog) error`). By default, audit records are formatted as structured logs via `slog`.
+
+You can persist outbound audit entries to databases (PostgreSQL, ClickHouse), message queues (RabbitMQ, Kafka), or external audit microservices (`be-audit-svc`). Use `MultiLogStore` to dispatch to multiple destinations simultaneously:
+
+```go
+// 1. Combine console logger with a custom database/message broker store
+customStore := &DatabaseStore{db: myDB} // Implements client.LogStore
+compositeStore := client.MultiLogStore(
+	client.NewConsoleStore(slog.Default()), // Retain stdout logs
+	customStore,                            // Persist to database / broker
+)
+
+// 2. Inject into client
+c := client.New(
+	client.WithBaseURL("https://api.partner.com"),
+	client.WithLogStore(compositeStore),
+	client.WithAuditConfig(
+		client.WithAuditServiceName("order-service"),
+		client.WithAuditLogStoreTimeout(3 * time.Second), // Safety timeout guard (default 5s)
+	),
+)
+```
+
 ### Custom OpenTelemetry Options
 
 You can pass custom `otelhttp.Option` values directly via `WithOTelOptions` (e.g., custom span name formatters, custom `TracerProvider`, or client trace filters):
@@ -287,6 +313,7 @@ Even with custom transports, OpenTelemetry tracing is **automatically applied an
 | `client.WithCircuitBreaker(opts...)` | Enables dynamic route-aware circuit breaking (`sony/gobreaker/v2`). | Disabled |
 | `client.WithAudit(cfg)` | Enables outbound audit logging via `AuditConfig` struct. | Disabled |
 | `client.WithAuditConfig(opts...)` | Enables outbound audit logging via functional `AuditOption` list. | Disabled |
+| `client.WithLogStore(store)` | Configures a custom `LogStore` backend for outbound audit logging. | Disabled |
 | `client.WithTransport(rt)` | Configures custom `http.RoundTripper` before OpenTelemetry wrapping. | Cloned `http.DefaultTransport` |
 | `client.WithOTelOptions(opts...)` | Passes custom OpenTelemetry `otelhttp.Option` configurations. | None |
 | `client.WithResty(fn)` | Arbitrary configuration callback on underlying `*resty.Client`. | `nil` |
@@ -323,6 +350,9 @@ Even with custom transports, OpenTelemetry tracing is **automatically applied an
 | `client.WithAuditOmitSensitiveHeaders(b)` | Drops sensitive headers instead of masking. | `false` |
 | `client.WithAuditContextAttrs(fn)` | Custom hook to extract `slog.Attr` from context. | `activity.ToSlogAttrs` fallback |
 | `client.WithAuditIDGenerator(fn)` | Custom fallback ID generator. | UUID v7 |
+| `client.WithAuditLogStore(store)` | Sets custom `LogStore` backend via functional option. | None |
+| `client.WithAuditStore(store)` | Alias for `WithAuditLogStore`. | None |
+| `client.WithAuditLogStoreTimeout(d)` | Maximum timeout duration for `Store.Save` execution. | `5s` |
 
 
 ---
