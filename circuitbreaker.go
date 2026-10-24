@@ -235,6 +235,13 @@ func newCircuitBreakerTransport(next http.RoundTripper, cbm *CircuitBreakerManag
 	}
 }
 
+// CloseIdleConnections closes idle connections on the wrapped next transport.
+func (t *circuitBreakerTransport) CloseIdleConnections() {
+	if ci, ok := t.next.(interface{ CloseIdleConnections() }); ok {
+		ci.CloseIdleConnections()
+	}
+}
+
 // RoundTrip executes the HTTP request under the protection of the route-keyed circuit breaker.
 func (t *circuitBreakerTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	if t.cbm == nil {

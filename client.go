@@ -43,6 +43,19 @@ func (c *Client) AuditConfig() *AuditConfig {
 	return c.auditCfg
 }
 
+// CloseIdleConnections closes all idle connections in the underlying HTTP transport pool.
+func (c *Client) CloseIdleConnections() {
+	if c == nil || c.Client == nil {
+		return
+	}
+	if cl := c.GetClient(); cl != nil {
+		if ci, ok := cl.Transport.(interface{ CloseIdleConnections() }); ok {
+			ci.CloseIdleConnections()
+		}
+		cl.CloseIdleConnections()
+	}
+}
+
 // SetTransport sets the HTTP transport for the client and ensures it is wrapped with OpenTelemetry instrumentation
 // and any configured dynamic Circuit Breaker.
 func (c *Client) SetTransport(transport http.RoundTripper) *Client {
@@ -50,19 +63,20 @@ func (c *Client) SetTransport(transport http.RoundTripper) *Client {
 		transport = defaultTransport()
 	}
 
+	current := transport
+	if c.cbManager != nil {
+		current = newCircuitBreakerTransport(current, c.cbManager)
+	}
+
 	var otelTransport http.RoundTripper
-	if ot, ok := transport.(*otelhttp.Transport); ok {
+	if ot, ok := current.(*otelhttp.Transport); ok {
 		otelTransport = ot
 	} else {
-		otelTransport = otelhttp.NewTransport(transport, c.otelOpts...)
+		metricsWrapped := newMetricsTransport(current)
+		otelTransport = otelhttp.NewTransport(metricsWrapped, c.otelOpts...)
 	}
 
-	finalTransport := otelTransport
-	if c.cbManager != nil {
-		finalTransport = newCircuitBreakerTransport(otelTransport, c.cbManager)
-	}
-
-	c.Client.SetTransport(finalTransport)
+	c.Client.SetTransport(otelTransport)
 	return c
 }
 

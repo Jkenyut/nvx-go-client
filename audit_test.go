@@ -765,6 +765,17 @@ func TestWithAudit_NilSafetyAndHelpers(t *testing.T) {
 		t.Errorf("expected empty string, got %q", resolveFullURL(emptyReq))
 	}
 
+	// Sensitive query parameter masking in URL
+	secReq := c.R()
+	secReq.URL = "https://api.example.com/v1/auth?token=supersecret&api_key=12345&page=2"
+	maskedURL := resolveFullURL(secReq)
+	if strings.Contains(maskedURL, "supersecret") || strings.Contains(maskedURL, "12345") {
+		t.Errorf("expected sensitive query parameters to be masked, got: %s", maskedURL)
+	}
+	if !strings.Contains(maskedURL, "page=2") {
+		t.Errorf("expected non-sensitive parameter page=2 to be preserved, got: %s", maskedURL)
+	}
+
 	// UserAgent resolution fallback
 	if resolveUserAgent(c.R()) == "" {
 		t.Errorf("expected default user agent")

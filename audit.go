@@ -6,6 +6,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"slices"
 	"strings"
 	"sync"
@@ -30,38 +31,7 @@ const (
 )
 
 // defaultMaskKeywords defines common sensitive fields that are always masked in headers and bodies.
-var defaultMaskKeywords = []string{
-	// Authentication & Base Secrets
-	"password", "password_cbo", "passphrase", "secret", "client_secret", "client_secret_encrypted",
-	"token", "access_token", "refresh_token", "id_token", "jwt",
-	"apikey", "api_key", "x-api-key", "client_id", "authorization",
-	"cookie", "set-cookie",
-
-	// Session & OTP
-	"session_id", "session_token", "auth_code", "verification_code", "otp",
-
-	// PIN & Pass Numbers
-	"pin", "mpin", "transaction_pin", "encrypted_pin_number",
-	"pass_number", "pass_number_cbo", "encrypted_pass_number", "encrypted_pass_number_cbo",
-	"pass_number_of_account", "encrypted_pass_number_of_account",
-
-	// Signatures & Hashes
-	"hash", "checksum", "signature", "signature_hash", "private_key", "tls_key", "certificate_key",
-
-	// Accounts & Cards
-	"account_number_encrypted", "account_number_cbo", "account_number_encrypted_cbo",
-	"card_number", "card_number_cbo", "encrypted_card_number", "encrypted_card_number_cbo",
-	"credit_card_number", "credit_card_number_cbo", "encrypted_credit_card_number", "encrypted_credit_card_number_cbo",
-	"cvv", "cvc", "cvv2", "cvc2",
-
-	// PII & Identification
-	"nik", "ktp", "ssn", "national_id", "id_card_number", "npwp", "tax_id",
-	"mother_maiden_name", "dob", "date_of_birth",
-	"phone", "phone_number", "mobile_number", "email", "email_address",
-
-	// General Encrypted Data
-	"encrypted_data",
-}
+var defaultMaskKeywords = format.DefaultMaskKeywords
 
 // HeaderKeys defines header names extracted into the audit log when context lacks them.
 type HeaderKeys struct {
@@ -479,7 +449,7 @@ func recordAuditLog(cfg *AuditConfig, req *resty.Request, resp *resty.Response, 
 	}
 	attrs = append(attrs,
 		slog.String("method", req.Method),
-		slog.String("url", resolveFullURL(req)),
+		slog.String("url", resolveFullURL(req, cfg.MaskKeywords...)),
 		slog.Int("status_code", statusCode),
 		slog.Int64("latency_ms", latencyMS),
 		slog.String("protocol", protocol),
@@ -547,7 +517,7 @@ func recordAuditLog(cfg *AuditConfig, req *resty.Request, resp *resty.Response, 
 		entry := &AuditLog{
 			ID:              entryID,
 			Method:          req.Method,
-			FullURL:         resolveFullURL(req),
+			FullURL:         resolveFullURL(req, cfg.MaskKeywords...),
 			StatusCode:      statusCode,
 			LatencyMS:       latencyMS,
 			IP:              ip,
@@ -811,16 +781,46 @@ func isSensitiveHeader(name string, keywords []string) bool {
 	return false
 }
 
-func resolveFullURL(req *resty.Request) string {
+func resolveFullURL(req *resty.Request, keywords ...string) string {
+	raw := ""
 	if req.RawRequest != nil && req.RawRequest.URL != nil {
 		if u := req.RawRequest.URL.String(); u != "" {
-			return u
+			raw = u
 		}
 	}
-	if req.URL != "" {
-		return req.URL
+	if raw == "" && req.URL != "" {
+		raw = req.URL
 	}
-	return ""
+	if raw == "" {
+		return ""
+	}
+	return sanitizeURLQuery(raw, keywords)
+}
+
+func sanitizeURLQuery(rawURL string, keywords []string) string {
+	if !strings.Contains(rawURL, "?") {
+		return rawURL
+	}
+	parsed, err := url.Parse(rawURL)
+	if err != nil {
+		return rawURL
+	}
+	query := parsed.Query()
+	if len(query) == 0 {
+		return rawURL
+	}
+	hasSensitive := false
+	for paramKey := range query {
+		if isSensitiveHeader(paramKey, keywords) {
+			query.Set(paramKey, "******")
+			hasSensitive = true
+		}
+	}
+	if hasSensitive {
+		parsed.RawQuery = query.Encode()
+		return parsed.String()
+	}
+	return rawURL
 }
 
 func resolveUserAgent(req *resty.Request) string {

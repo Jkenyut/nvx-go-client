@@ -1,0 +1,35 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master, development, "feature/**"]
+  pull_request:
+    branches: [main, master, development]
+
+jobs:
+  test:
+    name: Test & Verify
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Verify Go format
+        run: |
+          if [ -n "$(gofmt -l .)" ]; then
+            echo "Unformatted Go code detected:"
+            gofmt -l .
+            exit 1
+          fi
+
+      - name: Run go vet
+        run: go vet ./...
+
+      - name: Run unit tests with race detector
+        run: go test -v -race -covermode=atomic -coverprofile=coverage.out ./...

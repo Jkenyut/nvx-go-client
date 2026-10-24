@@ -3,7 +3,7 @@ module github.com/Jkenyut/nvx-go-client
 go 1.26.5
 
 require (
-	github.com/Jkenyut/nvx-go-helper v1.0.20-0.20260906032327-a316847eab82
+	github.com/Jkenyut/nvx-go-helper v1.0.20-0.20261024171732-4b32a21e8a3f
 	github.com/bytedance/sonic v1.15.1
 	github.com/go-resty/resty/v2 v2.17.2
 	github.com/sony/gobreaker/v2 v2.4.0
@@ -31,5 +31,3 @@ require (
 	golang.org/x/net v0.60.0 // indirect
 	golang.org/x/sys v0.48.0 // indirect
 )
-
-replace github.com/Jkenyut/nvx-go-helper => ../nvx-go-helper

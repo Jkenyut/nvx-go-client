@@ -2,6 +2,7 @@ package client
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"sync/atomic"
@@ -76,10 +77,14 @@ func TestNew_Defaults(t *testing.T) {
 	if c.GetClient().Timeout != DefaultTimeout {
 		t.Errorf("Expected timeout %v, got %v", DefaultTimeout, c.GetClient().Timeout)
 	}
-	// Verify transport is wrapped with otelhttp
+	// Verify transport is wrapped with metricsTransport containing otelhttp
 	transport := c.GetClient().Transport
-	if _, ok := transport.(*otelhttp.Transport); !ok {
-		t.Errorf("Expected transport to be *otelhttp.Transport, got %T", transport)
+	if mt, ok := transport.(*metricsTransport); ok {
+		if _, ok := mt.base.(*otelhttp.Transport); !ok {
+			t.Errorf("Expected base transport to be *otelhttp.Transport, got %T", mt.base)
+		}
+	} else if _, ok := transport.(*otelhttp.Transport); !ok {
+		t.Errorf("Expected transport to be *otelhttp.Transport or *metricsTransport, got %T", transport)
 	}
 }
 
@@ -131,12 +136,12 @@ func TestClient_Options(t *testing.T) {
 			MaxIdleConns: 50,
 		}
 		c := New(WithTransport(customTransport))
-		transport, ok := c.GetClient().Transport.(*otelhttp.Transport)
-		if !ok {
-			t.Fatalf("Expected transport to be wrapped in *otelhttp.Transport, got %T", c.GetClient().Transport)
-		}
-		if transport == nil {
-			t.Fatal("Expected non-nil wrapped transport")
+		if mt, ok := c.GetClient().Transport.(*metricsTransport); ok {
+			if _, ok := mt.base.(*otelhttp.Transport); !ok {
+				t.Fatalf("Expected base transport to be wrapped in *otelhttp.Transport, got %T", mt.base)
+			}
+		} else if _, ok := c.GetClient().Transport.(*otelhttp.Transport); !ok {
+			t.Fatalf("Expected transport to be wrapped in *otelhttp.Transport or *metricsTransport, got %T", c.GetClient().Transport)
 		}
 	})
 
@@ -263,18 +268,49 @@ func TestClient_SetTransport_GuaranteesInstrumentation(t *testing.T) {
 
 	t.Run("SetTransport nil resets safely", func(t *testing.T) {
 		c.SetTransport(nil)
-		if _, ok := c.GetClient().Transport.(*otelhttp.Transport); !ok {
-			t.Errorf("Expected *otelhttp.Transport after SetTransport(nil), got %T", c.GetClient().Transport)
+		if mt, ok := c.GetClient().Transport.(*metricsTransport); ok {
+			if _, ok := mt.base.(*otelhttp.Transport); !ok {
+				t.Errorf("Expected base to be *otelhttp.Transport after SetTransport(nil), got %T", mt.base)
+			}
+		} else if _, ok := c.GetClient().Transport.(*otelhttp.Transport); !ok {
+			t.Errorf("Expected *otelhttp.Transport or *metricsTransport after SetTransport(nil), got %T", c.GetClient().Transport)
 		}
 	})
 
 	t.Run("SetTransport already wrapped avoids double wrapping", func(t *testing.T) {
 		ot := otelhttp.NewTransport(http.DefaultTransport)
 		c.SetTransport(ot)
-		if c.GetClient().Transport != ot {
+		if mt, ok := c.GetClient().Transport.(*metricsTransport); ok {
+			if mt.base != ot {
+				t.Errorf("Expected base transport to match existing otelhttp.Transport directly")
+			}
+		} else if c.GetClient().Transport != ot {
 			t.Errorf("Expected transport to match existing otelhttp.Transport directly")
 		}
 	})
+}
+
+func TestClient_CloseIdleConnections(t *testing.T) {
+	c := New(WithCircuitBreaker())
+	c.CloseIdleConnections()
+
+	var nilClient *Client
+	nilClient.CloseIdleConnections()
+}
+
+func TestClassifyError(t *testing.T) {
+	if got := classifyError(nil); got != "" {
+		t.Errorf("expected empty string for nil error, got %q", got)
+	}
+	if got := classifyError(context.Canceled); got != "context_canceled" {
+		t.Errorf("expected 'context_canceled', got %q", got)
+	}
+	if got := classifyError(context.DeadlineExceeded); got != "timeout" {
+		t.Errorf("expected 'timeout', got %q", got)
+	}
+	if got := classifyError(errors.New("arbitrary connection error")); got != "transport_error" {
+		t.Errorf("expected 'transport_error', got %q", got)
+	}
 }
 
 func BenchmarkNew(b *testing.B) {
