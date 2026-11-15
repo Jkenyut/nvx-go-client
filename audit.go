@@ -15,9 +15,9 @@ import (
 	"github.com/Jkenyut/nvx-go-helper/activity"
 	"github.com/Jkenyut/nvx-go-helper/cryptoutil"
 	"github.com/Jkenyut/nvx-go-helper/format"
+	"github.com/Jkenyut/nvx-go-telemetry/telemetry"
 	"github.com/bytedance/sonic"
 	"github.com/go-resty/resty/v2"
-	"go.opentelemetry.io/otel/trace"
 )
 
 // Default limits and values for request and response body logging.
@@ -181,6 +181,20 @@ func applyAuditDefaults(cfg *AuditConfig) *AuditConfig {
 	}
 	cloned.MaskKeywords = mergedKeywords
 
+	// Pre-normalize HeadersToRemove (trim whitespace and deduplicate case-insensitively)
+	if len(cloned.HeadersToRemove) > 0 {
+		cleanedRemove := make([]string, 0, len(cloned.HeadersToRemove))
+		for _, h := range cloned.HeadersToRemove {
+			hTrim := strings.TrimSpace(h)
+			if hTrim != "" && !slices.ContainsFunc(cleanedRemove, func(existing string) bool {
+				return strings.EqualFold(existing, hTrim)
+			}) {
+				cleanedRemove = append(cleanedRemove, hTrim)
+			}
+		}
+		cloned.HeadersToRemove = cleanedRemove
+	}
+
 	// Fill default header keys if not specified
 	defHeaders := DefaultHeaderKeys()
 	if cloned.Headers.RequestID == "" {
@@ -306,11 +320,6 @@ func WithAuditLogStore(store LogStore) AuditOption {
 	}
 }
 
-// WithAuditStore is an alias for WithAuditLogStore.
-func WithAuditStore(store LogStore) AuditOption {
-	return WithAuditLogStore(store)
-}
-
 // WithAuditLogStoreTimeout sets the maximum duration allowed for Store.Save execution.
 func WithAuditLogStoreTimeout(timeout time.Duration) AuditOption {
 	return func(cfg *AuditConfig) {
@@ -339,7 +348,7 @@ func setupAuditHooks(r *resty.Client, cfg *AuditConfig) {
 		}
 		var once sync.Once
 		ctx = context.WithValue(ctx, auditRecordedKey{}, &once)
-		ctx = context.WithValue(ctx, auditStartTimeKey{}, time.Now())
+		ctx = context.WithValue(ctx, auditStartTimeKey{}, format.NowUTC())
 		req.SetContext(ctx)
 		return nil
 	})
@@ -378,7 +387,7 @@ func recordAuditLog(cfg *AuditConfig, req *resty.Request, resp *resty.Response, 
 		}
 	}
 
-	startTime := time.Now()
+	startTime := format.NowUTC()
 	if t, ok := ctx.Value(auditStartTimeKey{}).(time.Time); ok {
 		startTime = t
 	}
@@ -438,9 +447,12 @@ func recordAuditLog(cfg *AuditConfig, req *resty.Request, resp *resty.Response, 
 
 	var reqBodyRaw any
 	if cfg.LogRequestBodies {
-		rawBody, ct := extractRequestBody(req)
+		rawBody, ct := extractRequestBody(req, cfg.RequestBodyLogLimitSize)
 		reqBodyRaw = normalizeBodyRaw(rawBody, ct, cfg.MaskKeywords, cfg.RequestBodyLogLimitSize)
 	}
+
+	fullURL := resolveFullURL(req, cfg.MaskKeywords...)
+	userAgent := resolveUserAgent(req)
 
 	// Build slog attributes
 	attrs := make([]slog.Attr, 0, 16)
@@ -449,15 +461,15 @@ func recordAuditLog(cfg *AuditConfig, req *resty.Request, resp *resty.Response, 
 	}
 	attrs = append(attrs,
 		slog.String("method", req.Method),
-		slog.String("url", resolveFullURL(req, cfg.MaskKeywords...)),
+		slog.String("url", fullURL),
 		slog.Int("status_code", statusCode),
 		slog.Int64("latency_ms", latencyMS),
 		slog.String("protocol", protocol),
-		slog.String("user_agent", resolveUserAgent(req)),
+		slog.String("user_agent", userAgent),
 	)
 
 	// Context and tracing attributes (nvx-go-helper/activity with header and OTel fallback)
-	contextAttrs := extractContextAttrs(ctx, reqHeader, &cfg.Headers, cfg.ContextAttrs, cfg.IDGenerator)
+	contextAttrs, act := extractContextMetadata(ctx, reqHeader, &cfg.Headers, cfg.ContextAttrs, cfg.IDGenerator)
 	attrs = append(attrs, contextAttrs...)
 
 	reqHeadersNorm := normalizeHeaders(reqHeader, cfg.MaskKeywords, cfg.HeadersToRemove, cfg.OmitSensitiveHeaders)
@@ -480,34 +492,18 @@ func recordAuditLog(cfg *AuditConfig, req *resty.Request, resp *resty.Response, 
 		attrs = append(attrs, slog.String("error", errorMessage))
 	}
 
-	if cfg.Logger.Enabled(ctx, level) {
+	shouldEmitSlog := cfg.Logger.Enabled(ctx, level)
+	if cs, ok := cfg.Store.(*ConsoleStore); ok && cs != nil {
+		if cs.logger == cfg.Logger || (cs.logger == nil && cfg.Logger == slog.Default()) {
+			shouldEmitSlog = false
+		}
+	}
+	if shouldEmitSlog {
 		cfg.Logger.LogAttrs(ctx, level, cfg.Message, attrs...)
 	}
 
 	if cfg.Store != nil {
-		var (
-			correlationID string
-			requestID     string
-			ip            string
-			ipOrigin      string
-			createdBy     string
-		)
-		for _, a := range contextAttrs {
-			switch a.Key {
-			case "correlation_id":
-				correlationID = a.Value.String()
-			case "request_id":
-				requestID = a.Value.String()
-			case "user_ip":
-				ip = a.Value.String()
-			case "user_ip_origin":
-				ipOrigin = a.Value.String()
-			case "user_id":
-				createdBy = a.Value.String()
-			}
-		}
-
-		entryID := ""
+		var entryID string
 		if cfg.IDGenerator != nil {
 			entryID = cfg.IDGenerator()
 		} else {
@@ -517,22 +513,22 @@ func recordAuditLog(cfg *AuditConfig, req *resty.Request, resp *resty.Response, 
 		entry := &AuditLog{
 			ID:              entryID,
 			Method:          req.Method,
-			FullURL:         resolveFullURL(req, cfg.MaskKeywords...),
+			FullURL:         fullURL,
 			StatusCode:      statusCode,
 			LatencyMS:       latencyMS,
-			IP:              ip,
-			IPOrigin:        ipOrigin,
-			RequestID:       requestID,
-			CorrelationID:   correlationID,
+			IP:              act.UserIP,
+			IPOrigin:        act.UserIPOrigin,
+			RequestID:       act.RequestID,
+			CorrelationID:   act.CorrelationID,
 			RequestHeaders:  reqHeadersNorm,
 			ResponseHeaders: respHeaders,
 			RequestBody:     reqBodyRaw,
 			ResponseBody:    respBodyRaw,
-			CreatedBy:       createdBy,
+			CreatedBy:       act.UserID,
 			CreatedAt:       startTime,
 			Protocol:        protocol,
 			ServiceName:     cfg.ServiceName,
-			UserAgent:       resolveUserAgent(req),
+			UserAgent:       userAgent,
 			ErrorMessage:    errorMessage,
 		}
 
@@ -548,94 +544,85 @@ func recordAuditLog(cfg *AuditConfig, req *resty.Request, resp *resty.Response, 
 	}
 }
 
-func extractContextAttrs(ctx context.Context, header http.Header, keys *HeaderKeys, customExtractor func(ctx context.Context) []slog.Attr, idGen func() string) []slog.Attr {
+func extractContextMetadata(ctx context.Context, header http.Header, keys *HeaderKeys, customExtractor func(ctx context.Context) []slog.Attr, idGen func() string) ([]slog.Attr, activity.Activity) {
 	if customExtractor != nil {
 		if attrs := customExtractor(ctx); len(attrs) > 0 {
-			return attrs
+			var act activity.Activity
+			for _, a := range attrs {
+				switch a.Key {
+				case "correlation_id":
+					act.CorrelationID = a.Value.String()
+				case "request_id":
+					act.RequestID = a.Value.String()
+				case "user_ip":
+					act.UserIP = a.Value.String()
+				case "user_ip_origin":
+					act.UserIPOrigin = a.Value.String()
+				case "user_id":
+					act.UserID = a.Value.String()
+				}
+			}
+			return attrs, act
 		}
 	}
 
 	// 1. Extract standard attributes using nvx-go-helper/activity
-	actAttrs := activity.ToSlogAttrs(ctx)
-
-	hasTrx := false
-	hasReq := false
-	hasIP := false
-	hasIPOrigin := false
-	hasUser := false
-
-	for _, a := range actAttrs {
-		switch a.Key {
-		case "correlation_id":
-			hasTrx = true
-		case "request_id":
-			hasReq = true
-		case "user_ip":
-			hasIP = true
-		case "user_ip_origin":
-			hasIPOrigin = true
-		case "user_id":
-			hasUser = true
-		}
-	}
-
-	attrs := make([]slog.Attr, len(actAttrs), len(actAttrs)+5)
-	copy(attrs, actAttrs)
+	act := activity.FromContext(ctx)
 
 	if keys == nil {
 		def := DefaultHeaderKeys()
 		keys = &def
 	}
 
-	// 2. Fall back to headers and OTel SpanContext if missing
-	if !hasTrx {
-		var trxID string
+	// 2. Fall back to headers and nvx-go-telemetry SpanContext if missing
+	if act.CorrelationID == "" {
 		if header != nil {
-			trxID = header.Get(keys.CorrelationID)
+			act.CorrelationID = header.Get(keys.CorrelationID)
 		}
-		if trxID == "" {
-			span := trace.SpanFromContext(ctx)
-			if span != nil && span.SpanContext().IsValid() {
-				trxID = span.SpanContext().TraceID().String()
-			}
-		}
-		if trxID != "" {
-			attrs = append(attrs, slog.String("correlation_id", trxID))
+		if act.CorrelationID == "" {
+			act.CorrelationID = telemetry.TraceID(ctx)
 		}
 	}
 
-	if !hasReq {
-		var reqID string
+	if act.RequestID == "" {
 		if header != nil {
-			reqID = header.Get(keys.RequestID)
+			act.RequestID = header.Get(keys.RequestID)
 		}
-		if reqID == "" && idGen != nil {
-			reqID = idGen()
-		}
-		if reqID != "" {
-			attrs = append(attrs, slog.String("request_id", reqID))
+		if act.RequestID == "" && idGen != nil {
+			act.RequestID = idGen()
 		}
 	}
 
 	if header != nil {
-		if !hasIP {
-			if ip := header.Get(keys.IP); ip != "" {
-				attrs = append(attrs, slog.String("user_ip", ip))
-			}
+		if act.UserIP == "" {
+			act.UserIP = header.Get(keys.IP)
 		}
-		if !hasIPOrigin {
-			if ipOrigin := header.Get(keys.IPOrigin); ipOrigin != "" {
-				attrs = append(attrs, slog.String("user_ip_origin", ipOrigin))
-			}
+		if act.UserIPOrigin == "" {
+			act.UserIPOrigin = header.Get(keys.IPOrigin)
 		}
-		if !hasUser {
-			if uidStr := header.Get(keys.UserID); uidStr != "" {
-				attrs = append(attrs, slog.String("user_id", uidStr))
-			}
+		if act.UserID == "" {
+			act.UserID = header.Get(keys.UserID)
 		}
 	}
 
-	return attrs
+	attrs := make([]slog.Attr, 0, 5)
+	if act.CorrelationID != "" {
+		attrs = append(attrs, slog.String("correlation_id", act.CorrelationID))
+	}
+	if act.RequestID != "" {
+		attrs = append(attrs, slog.String("request_id", act.RequestID))
+	}
+	if act.UserID != "" {
+		attrs = append(attrs, slog.String("user_id", act.UserID))
+	}
+	if act.UserIP != "" {
+		attrs = append(attrs, slog.String("user_ip", act.UserIP))
+	}
+	if act.UserIPOrigin != "" {
+		attrs = append(attrs, slog.String("user_ip_origin", act.UserIPOrigin))
+	}
+
+	return attrs, act
 }
 
 func isMultipart(contentType string) bool {
@@ -654,7 +641,11 @@ func isBinary(contentType string) bool {
 		strings.HasPrefix(ct, "application/gzip")
 }
 
-func extractRequestBody(req *resty.Request) (body []byte, contentType string) {
+func extractRequestBody(req *resty.Request, limit int64) (body []byte, contentType string) {
+	if limit <= 0 {
+		limit = DefaultRequestBodyLogLimitSize
+	}
+
 	ct := req.Header.Get("Content-Type")
 	if ct == "" && req.RawRequest != nil && req.RawRequest.Header != nil {
 		ct = req.RawRequest.Header.Get("Content-Type")
@@ -678,7 +669,7 @@ func extractRequestBody(req *resty.Request) (body []byte, contentType string) {
 		return []byte(b), ct
 	case io.Reader:
 		if rs, ok := b.(io.ReadSeeker); ok {
-			data, err := io.ReadAll(rs)
+			data, err := io.ReadAll(io.LimitReader(rs, limit))
 			if err == nil {
 				_, _ = rs.Seek(0, io.SeekStart)
 				return data, ct
@@ -716,16 +707,25 @@ func normalizeBodyRaw(raw []byte, contentType string, keywordList []string, limi
 		raw = raw[:limit]
 	}
 
-	str := string(raw)
 	if len(keywordList) > 0 {
-		str = format.MaskAfterKeywords(str, keywordList, "*")
+		str := format.MaskAfterKeywords(string(raw), keywordList, "*")
+		strBytes := []byte(str)
+		if sonic.ConfigDefault.Valid(strBytes) {
+			var v any
+			if err := sonic.ConfigDefault.Unmarshal(strBytes, &v); err == nil {
+				return v
+			}
+		}
+		return str
 	}
 
-	var v any
-	if err := sonic.ConfigDefault.UnmarshalFromString(str, &v); err == nil {
-		return v
+	if sonic.ConfigDefault.Valid(raw) {
+		var v any
+		if err := sonic.ConfigDefault.Unmarshal(raw, &v); err == nil {
+			return v
+		}
 	}
-	return str
+	return string(raw)
 }
 
 func normalizeHeaders(h http.Header, keywordList, headersToRemove []string, omitSensitive bool) map[string]any {

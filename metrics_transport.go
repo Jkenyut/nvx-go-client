@@ -7,7 +7,7 @@ import (
 	"net/http"
 	"time"
 
-	"go.opentelemetry.io/otel"
+	"github.com/Jkenyut/nvx-go-telemetry/telemetry"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
 )
@@ -19,18 +19,18 @@ type metricsTransport struct {
 }
 
 func newMetricsTransport(base http.RoundTripper) http.RoundTripper {
-	meter := otel.Meter("github.com/Jkenyut/nvx-go-client")
+	mm := telemetry.NewMetricManager("github.com/Jkenyut/nvx-go-client")
 
-	durationHist, _ := meter.Float64Histogram(
+	durationHist, _ := mm.RegisterHistogram(
 		"http.client.request.duration",
-		metric.WithDescription("Duration of outbound HTTP requests in seconds"),
-		metric.WithUnit("s"),
+		"Duration of outbound HTTP requests in seconds",
+		"s",
 		metric.WithExplicitBucketBoundaries(0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10),
 	)
 
-	reqCounter, _ := meter.Int64Counter(
+	reqCounter, _ := mm.RegisterCounter(
 		"http.client.requests.total",
-		metric.WithDescription("Total number of outbound HTTP requests initiated"),
+		"Total number of outbound HTTP requests initiated",
 	)
 
 	return &metricsTransport{
@@ -58,18 +58,16 @@ func (m *metricsTransport) RoundTrip(req *http.Request) (*http.Response, error) 
 		statusCode = resp.StatusCode
 	}
 
-	serverAddr := ""
-	if req.URL != nil {
-		serverAddr = req.URL.Host
-	} else if req.Host != "" {
-		serverAddr = req.Host
-	}
+	serverAddr := extractServerHost(req)
+	routeTemplate := extractRouteTemplate(req)
 
-	attrs := []attribute.KeyValue{
+	attrs := make([]attribute.KeyValue, 0, 5)
+	attrs = append(attrs,
 		attribute.String("http.request.method", req.Method),
 		attribute.String("server.address", serverAddr),
+		attribute.String("http.route", routeTemplate),
 		attribute.Int("http.response.status_code", statusCode),
-	}
+	)
 	if err != nil {
 		attrs = append(attrs, attribute.String("error.type", classifyError(err)))
 	}
@@ -94,8 +92,7 @@ func classifyError(err error) string {
 	case errors.Is(err, context.DeadlineExceeded):
 		return "timeout"
 	default:
-		var netErr net.Error
-		if errors.As(err, &netErr) {
+		if netErr, ok := errors.AsType[net.Error](err); ok {
 			if netErr.Timeout() {
 				return "network_timeout"
 			}

@@ -30,10 +30,14 @@ func NewConsoleStore(logger *slog.Logger) *ConsoleStore {
 
 // Save writes the audit log entry as structured log attributes via slog.
 func (c *ConsoleStore) Save(ctx context.Context, entry *AuditLog) error {
-	if entry == nil {
+	if c == nil || entry == nil {
 		return nil
 	}
-	c.logger.InfoContext(ctx, "outbound audit log",
+	l := c.logger
+	if l == nil {
+		l = slog.Default()
+	}
+	l.InfoContext(ctx, "outbound audit log",
 		slog.String("id", entry.ID),
 		slog.String("service_name", entry.ServiceName),
 		slog.String("method", entry.Method),
@@ -86,14 +90,23 @@ func MultiLogStore(stores ...LogStore) LogStore {
 	return &multiLogStore{stores: valid}
 }
 
-// Save broadcasts the audit log entry to all configured stores sequentially.
+// Save broadcasts the audit log entry to all configured stores concurrently.
 func (m *multiLogStore) Save(ctx context.Context, entry *AuditLog) error {
 	if m == nil || len(m.stores) == 0 || entry == nil {
 		return nil
 	}
-	var errs []error
+	if len(m.stores) == 1 {
+		return m.stores[0].Save(ctx, entry)
+	}
+	errCh := make(chan error, len(m.stores))
 	for _, s := range m.stores {
-		if err := s.Save(ctx, entry); err != nil {
+		go func(store LogStore) {
+			errCh <- store.Save(ctx, entry)
+		}(s)
+	}
+	var errs []error
+	for range m.stores {
+		if err := <-errCh; err != nil {
 			errs = append(errs, err)
 		}
 	}

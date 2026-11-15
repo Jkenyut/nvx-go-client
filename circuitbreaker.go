@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Jkenyut/nvx-go-telemetry/telemetry"
 	"github.com/sony/gobreaker/v2"
 	"go.opentelemetry.io/otel/trace"
 )
@@ -62,28 +63,10 @@ func WithCBInterval(interval time.Duration) CircuitBreakerOption {
 	}
 }
 
-// WithCBIntervalMS sets the cyclic duration of the closed state in milliseconds.
-func WithCBIntervalMS(ms int64) CircuitBreakerOption {
-	return func(cfg *CircuitBreakerConfig) {
-		if ms > 0 {
-			cfg.Interval = time.Duration(ms) * time.Millisecond
-		}
-	}
-}
-
 // WithCBTimeout sets the cooldown duration in open state before transitioning to half-open.
 func WithCBTimeout(timeout time.Duration) CircuitBreakerOption {
 	return func(cfg *CircuitBreakerConfig) {
 		cfg.Timeout = timeout
-	}
-}
-
-// WithCBTimeoutMS sets the cooldown duration in open state before transitioning to half-open in milliseconds.
-func WithCBTimeoutMS(ms int64) CircuitBreakerOption {
-	return func(cfg *CircuitBreakerConfig) {
-		if ms > 0 {
-			cfg.Timeout = time.Duration(ms) * time.Millisecond
-		}
 	}
 }
 
@@ -178,6 +161,26 @@ func (m *CircuitBreakerManager) GetOrCreate(routeKey string) *gobreaker.TwoStepC
 		return cb
 	}
 
+	// Ensure zero-value CircuitBreakerManager is usable without NewCircuitBreakerManager.
+	if m.breakers == nil {
+		m.breakers = make(map[string]*gobreaker.TwoStepCircuitBreaker[struct{}])
+	}
+	if m.cfg.MaxRequests == 0 && m.cfg.Interval == 0 && m.cfg.Timeout == 0 {
+		def := defaultCBConfig()
+		m.cfg.MaxRequests = def.MaxRequests
+		m.cfg.Interval = def.Interval
+		m.cfg.Timeout = def.Timeout
+		if m.cfg.ReadyToTrip == nil {
+			m.cfg.ReadyToTrip = def.ReadyToTrip
+		}
+		if m.cfg.RouteKeyFunc == nil {
+			m.cfg.RouteKeyFunc = def.RouteKeyFunc
+		}
+		if m.cfg.MaxBreakers == 0 {
+			m.cfg.MaxBreakers = def.MaxBreakers
+		}
+	}
+
 	// Safety guard against unbounded cardinality: evict if capacity exceeded
 	if m.cfg.MaxBreakers > 0 && len(m.breakers) >= m.cfg.MaxBreakers {
 		// Pass 1: Prune closed (healthy) breakers to preserve open/half-open tripping states
@@ -248,7 +251,11 @@ func (t *circuitBreakerTransport) RoundTrip(req *http.Request) (*http.Response, 
 		return t.next.RoundTrip(req)
 	}
 
-	routeKey := t.cbm.cfg.RouteKeyFunc(req)
+	routeKeyFunc := t.cbm.cfg.RouteKeyFunc
+	if routeKeyFunc == nil {
+		routeKeyFunc = DefaultRouteKey
+	}
+	routeKey := routeKeyFunc(req)
 	cb := t.cbm.GetOrCreate(routeKey)
 
 	done, err := cb.Allow()
@@ -257,7 +264,7 @@ func (t *circuitBreakerTransport) RoundTrip(req *http.Request) (*http.Response, 
 		// Record error in OpenTelemetry span if available
 		span := trace.SpanFromContext(req.Context())
 		if span.IsRecording() {
-			span.RecordError(err)
+			telemetry.RecordError(span, err)
 		}
 		return nil, fmt.Errorf("circuit breaker %q rejected request: %w", routeKey, err)
 	}

@@ -82,6 +82,11 @@ func TestConsoleStore_Save(t *testing.T) {
 	if err := cs.Save(context.Background(), nil); err != nil {
 		t.Fatalf("expected nil for nil entry, got %v", err)
 	}
+
+	var zeroCS ConsoleStore
+	if err := zeroCS.Save(context.Background(), entry); err != nil {
+		t.Fatalf("expected nil on zero-value ConsoleStore, got %v", err)
+	}
 }
 
 func TestClient_WithLogStore_Integration(t *testing.T) {

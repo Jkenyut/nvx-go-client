@@ -716,7 +716,7 @@ func TestWithAudit_NilSafetyAndHelpers(t *testing.T) {
 	// Extract request body with form data
 	r := c.R()
 	r.SetFormData(map[string]string{"foo": "bar"})
-	b, ct := extractRequestBody(r)
+	b, ct := extractRequestBody(r, DefaultRequestBodyLogLimitSize)
 	if !strings.Contains(string(b), "foo=bar") || ct != "application/x-www-form-urlencoded" {
 		t.Errorf("form data extraction mismatch: %s (%s)", b, ct)
 	}
@@ -724,7 +724,7 @@ func TestWithAudit_NilSafetyAndHelpers(t *testing.T) {
 	// Extract request body with reader
 	readerReq := c.R()
 	readerReq.SetBody(strings.NewReader("reader data"))
-	bReader, _ := extractRequestBody(readerReq)
+	bReader, _ := extractRequestBody(readerReq, DefaultRequestBodyLogLimitSize)
 	if string(bReader) != "reader data" {
 		t.Errorf("reader extraction mismatch: %s", bReader)
 	}
@@ -784,7 +784,7 @@ func TestWithAudit_NilSafetyAndHelpers(t *testing.T) {
 	// extractRequestBody with struct
 	structReq := c.R()
 	structReq.SetBody(map[string]int{"count": 42})
-	structBody, structCT := extractRequestBody(structReq)
+	structBody, structCT := extractRequestBody(structReq, DefaultRequestBodyLogLimitSize)
 	if !strings.Contains(string(structBody), "42") || structCT != "application/json" {
 		t.Errorf("expected struct to be marshaled to json: %s (%s)", structBody, structCT)
 	}
@@ -792,7 +792,7 @@ func TestWithAudit_NilSafetyAndHelpers(t *testing.T) {
 	// extractRequestBody with NoBody
 	noBodyReq := c.R()
 	noBodyReq.SetBody(http.NoBody)
-	noBody, _ := extractRequestBody(noBodyReq)
+	noBody, _ := extractRequestBody(noBodyReq, DefaultRequestBodyLogLimitSize)
 	if noBody != nil {
 		t.Errorf("expected nil for NoBody, got %v", noBody)
 	}
@@ -993,4 +993,82 @@ func TestWithAudit_RetryBehavior(t *testing.T) {
 	if records[2].getInt("status_code") != http.StatusOK {
 		t.Errorf("expected attempt 3 status_code 200, got %d", records[2].getInt("status_code"))
 	}
+}
+
+type auditRecordingStore struct {
+	mu      sync.Mutex
+	entries []*AuditLog
+}
+
+func (s *auditRecordingStore) Save(_ context.Context, entry *AuditLog) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.entries = append(s.entries, entry)
+	return nil
+}
+
+func TestWithAudit_CombinedOptionsAndBoundedReader(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer ts.Close()
+
+	t.Run("WithAuditConfig combined with WithLogStore registers hooks once", func(t *testing.T) {
+		logger, handler := newTestLogger()
+		store := &auditRecordingStore{}
+
+		c := New(
+			WithBaseURL(ts.URL),
+			WithAuditConfig(
+				WithAuditLogger(logger),
+				WithAuditServiceName("combined-service"),
+			),
+			WithLogStore(store),
+		)
+
+		if _, err := c.R().Get("/combined"); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		if got := len(handler.getRecords()); got != 1 {
+			t.Errorf("expected exactly 1 slog record, got %d", got)
+		}
+		store.mu.Lock()
+		storeCount := len(store.entries)
+		store.mu.Unlock()
+		if storeCount != 1 {
+			t.Errorf("expected exactly 1 store entry, got %d", storeCount)
+		}
+	})
+
+	t.Run("ConsoleStore with same logger avoids duplicate slog output", func(t *testing.T) {
+		logger, handler := newTestLogger()
+		c := New(
+			WithBaseURL(ts.URL),
+			WithAudit(AuditConfig{
+				Logger: logger,
+				Store:  NewConsoleStore(logger),
+			}),
+		)
+
+		if _, err := c.R().Get("/dedup-console"); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		if got := len(handler.getRecords()); got != 1 {
+			t.Errorf("expected exactly 1 slog record when sharing logger with ConsoleStore, got %d", got)
+		}
+	})
+
+	t.Run("extractRequestBody bounds ReadSeeker allocation", func(t *testing.T) {
+		c := New()
+		req := c.R()
+		payload := strings.Repeat("a", 64)
+		req.SetBody(strings.NewReader(payload))
+
+		body, _ := extractRequestBody(req, 10)
+		if len(body) != 10 {
+			t.Errorf("expected bounded body of 10 bytes, got %d", len(body))
+		}
+	})
 }

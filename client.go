@@ -1,11 +1,13 @@
 package client
 
 import (
+	"net"
 	"net/http"
 	"time"
 
 	"github.com/go-resty/resty/v2"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
+	"go.opentelemetry.io/otel/metric/noop"
 )
 
 const (
@@ -18,6 +20,9 @@ const (
 	// DefaultMaxIdleConnsPerHost is the default maximum idle (keep-alive) connections per host.
 	DefaultMaxIdleConnsPerHost = 20
 
+	// DefaultMaxConnsPerHost is the default maximum total (active + idle) connections per host.
+	DefaultMaxConnsPerHost = 100
+
 	// DefaultIdleConnTimeout is the default maximum time an idle connection will remain open.
 	DefaultIdleConnTimeout = 90 * time.Second
 )
@@ -25,9 +30,11 @@ const (
 // Client is a wrapper around resty.Client that is automatically instrumented with OpenTelemetry.
 type Client struct {
 	*resty.Client
-	otelOpts  []otelhttp.Option
-	cbManager *CircuitBreakerManager
-	auditCfg  *AuditConfig
+	otelOpts         []otelhttp.Option
+	cbManager        *CircuitBreakerManager
+	auditCfg         *AuditConfig
+	baseTransport    http.RoundTripper
+	wrappedTransport http.RoundTripper
 }
 
 // Option is a function for configuring the client.
@@ -49,18 +56,50 @@ func (c *Client) CloseIdleConnections() {
 		return
 	}
 	if cl := c.GetClient(); cl != nil {
-		if ci, ok := cl.Transport.(interface{ CloseIdleConnections() }); ok {
-			ci.CloseIdleConnections()
-		}
 		cl.CloseIdleConnections()
+		if c.baseTransport != nil && c.baseTransport != cl.Transport {
+			if _, ok := cl.Transport.(interface{ CloseIdleConnections() }); !ok {
+				if ci, ok := c.baseTransport.(interface{ CloseIdleConnections() }); ok {
+					ci.CloseIdleConnections()
+				}
+			}
+		}
 	}
 }
 
 // SetTransport sets the HTTP transport for the client and ensures it is wrapped with OpenTelemetry instrumentation
-// and any configured dynamic Circuit Breaker.
+// and any configured dynamic Circuit Breaker without double-wrapping existing layers.
 func (c *Client) SetTransport(transport http.RoundTripper) *Client {
 	if transport == nil {
 		transport = defaultTransport()
+	}
+
+	if c.wrappedTransport != nil && transport == c.wrappedTransport && c.baseTransport != nil {
+		transport = c.baseTransport
+	}
+
+	for {
+		if mt, ok := transport.(*metricsTransport); ok {
+			transport = mt.base
+			continue
+		}
+		if cbt, ok := transport.(*circuitBreakerTransport); ok {
+			transport = cbt.next
+			continue
+		}
+		break
+	}
+
+	c.baseTransport = transport
+
+	if ot, ok := transport.(*otelhttp.Transport); ok {
+		var final http.RoundTripper = ot
+		if c.cbManager != nil {
+			final = newCircuitBreakerTransport(ot, c.cbManager)
+		}
+		c.wrappedTransport = final
+		c.Client.SetTransport(final)
+		return c
 	}
 
 	current := transport
@@ -68,14 +107,13 @@ func (c *Client) SetTransport(transport http.RoundTripper) *Client {
 		current = newCircuitBreakerTransport(current, c.cbManager)
 	}
 
-	var otelTransport http.RoundTripper
-	if ot, ok := current.(*otelhttp.Transport); ok {
-		otelTransport = ot
-	} else {
-		metricsWrapped := newMetricsTransport(current)
-		otelTransport = otelhttp.NewTransport(metricsWrapped, c.otelOpts...)
-	}
+	metricsWrapped := newMetricsTransport(current)
+	otelOpts := make([]otelhttp.Option, 0, 1+len(c.otelOpts))
+	otelOpts = append(otelOpts, otelhttp.WithMeterProvider(noop.NewMeterProvider()))
+	otelOpts = append(otelOpts, c.otelOpts...)
+	otelTransport := otelhttp.NewTransport(metricsWrapped, otelOpts...)
 
+	c.wrappedTransport = otelTransport
 	c.Client.SetTransport(otelTransport)
 	return c
 }
@@ -84,15 +122,6 @@ func (c *Client) SetTransport(transport http.RoundTripper) *Client {
 func WithTimeout(timeout time.Duration) Option {
 	return func(c *Client) {
 		c.SetTimeout(timeout)
-	}
-}
-
-// WithTimeoutMS sets the default request timeout in milliseconds.
-func WithTimeoutMS(ms int64) Option {
-	return func(c *Client) {
-		if ms > 0 {
-			c.SetTimeout(time.Duration(ms) * time.Millisecond)
-		}
 	}
 }
 
@@ -109,16 +138,6 @@ func WithRetry(count int, waitTime time.Duration) Option {
 		c.SetRetryCount(count)
 		if waitTime > 0 {
 			c.SetRetryWaitTime(waitTime)
-		}
-	}
-}
-
-// WithRetryMS configures the client's retry count and optional retry wait time in milliseconds.
-func WithRetryMS(count int, waitTimeMS int64) Option {
-	return func(c *Client) {
-		c.SetRetryCount(count)
-		if waitTimeMS > 0 {
-			c.SetRetryWaitTime(time.Duration(waitTimeMS) * time.Millisecond)
 		}
 	}
 }
@@ -150,31 +169,28 @@ func WithCircuitBreaker(opts ...CircuitBreakerOption) Option {
 func WithAudit(cfg AuditConfig) Option {
 	return func(c *Client) {
 		c.auditCfg = applyAuditDefaults(&cfg)
-		setupAuditHooks(c.Client, c.auditCfg)
 	}
 }
 
 // WithAuditConfig enables outbound audit logging configured via functional AuditOptions.
 func WithAuditConfig(opts ...AuditOption) Option {
-	var cfg AuditConfig
-	for _, opt := range opts {
-		if opt != nil {
-			opt(&cfg)
+	return func(c *Client) {
+		var cfg AuditConfig
+		if c.auditCfg != nil {
+			cfg = *c.auditCfg
 		}
+		for _, opt := range opts {
+			if opt != nil {
+				opt(&cfg)
+			}
+		}
+		c.auditCfg = applyAuditDefaults(&cfg)
 	}
-	return WithAudit(cfg)
 }
 
 // WithLogStore configures a custom LogStore for outbound audit logging.
 func WithLogStore(store LogStore) Option {
-	return func(c *Client) {
-		if c.auditCfg == nil {
-			c.auditCfg = applyAuditDefaults(&AuditConfig{Store: store})
-			setupAuditHooks(c.Client, c.auditCfg)
-			return
-		}
-		c.auditCfg.Store = store
-	}
+	return WithAuditConfig(WithAuditLogStore(store))
 }
 
 // WithResty allows configuring the underlying resty client safely
@@ -202,6 +218,10 @@ func New(opts ...Option) *Client {
 		}
 	}
 
+	if c.auditCfg != nil {
+		setupAuditHooks(c.Client, c.auditCfg)
+	}
+
 	// Retrieve the transport which might have been set via opts (or default to nil).
 	// Calling SetTransport guarantees it is wrapped with OpenTelemetry instrumentation.
 	transport := r.GetClient().Transport
@@ -215,13 +235,20 @@ func defaultTransport() *http.Transport {
 		t := dt.Clone()
 		t.MaxIdleConns = DefaultMaxIdleConns
 		t.MaxIdleConnsPerHost = DefaultMaxIdleConnsPerHost
+		t.MaxConnsPerHost = DefaultMaxConnsPerHost
 		t.IdleConnTimeout = DefaultIdleConnTimeout
 		return t
 	}
 	return &http.Transport{
-		Proxy:                 http.ProxyFromEnvironment,
+		Proxy: http.ProxyFromEnvironment,
+		DialContext: (&net.Dialer{
+			Timeout:   30 * time.Second,
+			KeepAlive: 30 * time.Second,
+		}).DialContext,
+		ForceAttemptHTTP2:     true,
 		MaxIdleConns:          DefaultMaxIdleConns,
 		MaxIdleConnsPerHost:   DefaultMaxIdleConnsPerHost,
+		MaxConnsPerHost:       DefaultMaxConnsPerHost,
 		IdleConnTimeout:       DefaultIdleConnTimeout,
 		TLSHandshakeTimeout:   10 * time.Second,
 		ExpectContinueTimeout: 1 * time.Second,

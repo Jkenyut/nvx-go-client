@@ -148,11 +148,11 @@ func TestDefaultRouteKey(t *testing.T) {
 
 	t.Run("invalid formats fall back to static segments", func(t *testing.T) {
 		// 36 chars with wrong dashes
-		if isUUID("550e8400xe29b-41d4-a716-446655440000") {
+		if isDynamicParam("550e8400xe29b-41d4-a716-446655440000") {
 			t.Error("Expected false for invalid UUID dashes")
 		}
 		// 36 chars with non-hex
-		if isUUID("550e8400-e29b-41d4-a716-44665544000z") {
+		if isDynamicParam("550e8400-e29b-41d4-a716-44665544000z") {
 			t.Error("Expected false for non-hex UUID")
 		}
 		// 24 chars with non-hex
@@ -415,19 +415,6 @@ func TestCircuitBreaker_OptionsAndDefaults(t *testing.T) {
 		}
 	}
 
-	// Test MS options
-	cMS := New(WithCircuitBreaker(
-		WithCBIntervalMS(1500),
-		WithCBTimeoutMS(2500),
-	))
-	cbmMS := cMS.CircuitBreakerManager()
-	if cbmMS.cfg.Interval != 1500*time.Millisecond {
-		t.Errorf("Expected Interval 1500ms, got %v", cbmMS.cfg.Interval)
-	}
-	if cbmMS.cfg.Timeout != 2500*time.Millisecond {
-		t.Errorf("Expected Timeout 2500ms, got %v", cbmMS.cfg.Timeout)
-	}
-
 	// Test default ReadyToTrip
 	defCfg := defaultCBConfig()
 	// Case 1: Requests < 10 -> returns false
@@ -665,5 +652,22 @@ func TestCircuitBreaker_NilResponseFromNextRoundTripper(t *testing.T) {
 	}
 	if err != nil {
 		t.Errorf("expected nil error, got %v", err)
+	}
+}
+
+func TestCircuitBreaker_ZeroValueSafety(t *testing.T) {
+	var cbm CircuitBreakerManager
+	transport := newCircuitBreakerTransport(&nilResponseRoundTripper{}, &cbm)
+
+	req, err := http.NewRequest(http.MethodGet, "https://api.example.com/zero-value", nil)
+	if err != nil {
+		t.Fatalf("unexpected error creating request: %v", err)
+	}
+
+	if _, rtErr := transport.RoundTrip(req); rtErr != nil {
+		t.Fatalf("unexpected error on zero-value CircuitBreakerManager: %v", rtErr)
+	}
+	if cbm.Count() != 1 {
+		t.Errorf("expected 1 registered breaker, got %d", cbm.Count())
 	}
 }

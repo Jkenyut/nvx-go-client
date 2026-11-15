@@ -323,10 +323,8 @@ c := client.New(
 | Option | Default | Description (ASD-STE100) |
 | :--- | :--- | :--- |
 | `client.WithTimeout(d)` | `30s` | Sets request timeout duration. |
-| `client.WithTimeoutMS(ms)` | `30000ms` | Sets request timeout in milliseconds. |
 | `client.WithBaseURL(url)` | `""` | Sets target base URL for requests. |
 | `client.WithRetry(count, wait)` | `0`, `0s` | Sets retry count and wait duration. |
-| `client.WithRetryMS(count, waitMS)` | `0`, `0ms` | Sets retry count and wait time in milliseconds. |
 | `client.WithCircuitBreaker(opts...)` | Disabled | Enables dynamic route-aware circuit breaking. |
 | `client.WithAudit(cfg)` | Disabled | Enables audit logging using configuration struct. |
 | `client.WithAuditConfig(opts...)` | Disabled | Enables audit logging using functional options. |
@@ -340,9 +338,7 @@ c := client.New(
 | Option | Default | Description (ASD-STE100) |
 | :--- | :--- | :--- |
 | `client.WithCBTimeout(d)` | `30s` | Sets cooldown duration in open state. |
-| `client.WithCBTimeoutMS(ms)` | `30000ms` | Sets open state duration in milliseconds. |
 | `client.WithCBInterval(d)` | `30s` | Sets cyclic duration to clear closed state counts. |
-| `client.WithCBIntervalMS(ms)` | `30000ms` | Sets cyclic count duration in milliseconds. |
 | `client.WithCBMaxRequests(n)` | `3` | Sets allowed probe requests in half-open state. |
 | `client.WithCBMaxBreakers(n)` | `1000` | Sets maximum circuit breakers kept in memory. |
 | `client.WithCBReadyToTrip(fn)` | Standard Gate | Sets trip predicate function for open state. |
@@ -368,7 +364,6 @@ c := client.New(
 | `client.WithAuditContextAttrs(fn)` | Activity Fallback | Sets custom context attribute extraction function. |
 | `client.WithAuditIDGenerator(fn)` | UUID v7 | Sets unique identifier generator function. |
 | `client.WithAuditLogStore(store)` | None | Sets custom `LogStore` destination. |
-| `client.WithAuditStore(store)` | None | Acts as alias for `WithAuditLogStore`. |
 | `client.WithAuditLogStoreTimeout(d)` | `5s` | Sets execution timeout for storage saves. |
 
 ---
@@ -595,39 +590,15 @@ Go's `http.DefaultTransport` limits idle connections per host to 2. The `nvx-go-
 
 - **`MaxIdleConns: 100`:** Keeps up to 100 total idle connections open across all hosts.
 - **`MaxIdleConnsPerHost: 20`:** Keeps up to 20 idle connections open per individual host.
+- **`MaxConnsPerHost: 100`:** Caps total active and idle connections per host to prevent port exhaustion.
 - **`IdleConnTimeout: 90s`:** Closes idle connections after 90 seconds of inactivity.
 - **`TLSHandshakeTimeout: 10s`:** Sets timeout for TLS connection establishment.
 - **`ExpectContinueTimeout: 1s`:** Sets timeout for HTTP 100-continue header response.
+- **`DialContext` & `ForceAttemptHTTP2: true`:** Configures `net.Dialer` (`30s` timeout and keep-alive) and HTTP/2 negotiation even in fallback transports.
 
 ### 6.7 OpenTelemetry and Metric Transport Invariant
 
-Calling `c.SetTransport()` preserves OpenTelemetry tracing, metrics collection, and circuit breaking:
-
-```go
-func (c *Client) SetTransport(transport http.RoundTripper) *Client {
-	if transport == nil {
-		transport = defaultTransport()
-	}
-
-	current := transport
-	if c.cbManager != nil {
-		current = newCircuitBreakerTransport(current, c.cbManager)
-	}
-
-	var otelTransport http.RoundTripper
-	if ot, ok := current.(*otelhttp.Transport); ok {
-		otelTransport = ot
-	} else {
-		metricsWrapped := newMetricsTransport(current)
-		otelTransport = otelhttp.NewTransport(metricsWrapped, c.otelOpts...)
-	}
-
-	c.Client.SetTransport(otelTransport)
-	return c
-}
-```
-
-The outer OpenTelemetry transport creates trace spans for all outgoing requests. The middle metrics transport records latency and error metrics. The inner circuit breaker evaluates route health before sending network traffic.
+Calling `c.SetTransport()` preserves OpenTelemetry tracing, metrics collection, and circuit breaking without double-wrapping existing layers. The outer OpenTelemetry transport creates trace spans for all outgoing requests, the middle `nvx-go-telemetry` metrics transport records latency and error metrics (`http.client.request.duration`, `http.client.requests.total`) without double-recording, and the inner circuit breaker evaluates route health before sending network traffic.
 
 ---
 

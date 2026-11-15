@@ -155,34 +155,6 @@ func TestClient_Options(t *testing.T) {
 		}
 	})
 
-	t.Run("WithTimeoutMS", func(t *testing.T) {
-		timeoutMS := int64(2500)
-		c := New(WithTimeoutMS(timeoutMS))
-		expected := 2500 * time.Millisecond
-		if c.GetClient().Timeout != expected {
-			t.Errorf("Expected timeout %v, got %v", expected, c.GetClient().Timeout)
-		}
-
-		// Non-positive does nothing
-		c2 := New(WithTimeoutMS(0))
-		if c2.GetClient().Timeout != DefaultTimeout {
-			t.Errorf("Expected default timeout %v, got %v", DefaultTimeout, c2.GetClient().Timeout)
-		}
-	})
-
-	t.Run("WithRetryMS", func(t *testing.T) {
-		retryCount := 4
-		retryWaitMS := int64(350)
-		c := New(WithRetryMS(retryCount, retryWaitMS))
-		expectedWait := 350 * time.Millisecond
-		if c.RetryCount != retryCount {
-			t.Errorf("Expected RetryCount %d, got %d", retryCount, c.RetryCount)
-		}
-		if c.RetryWaitTime != expectedWait {
-			t.Errorf("Expected RetryWaitTime %v, got %v", expectedWait, c.RetryWaitTime)
-		}
-	})
-
 	t.Run("WithAuditConfig", func(t *testing.T) {
 		c := New(WithAuditConfig(
 			WithAuditServiceName("test-service"),
@@ -286,6 +258,34 @@ func TestClient_SetTransport_GuaranteesInstrumentation(t *testing.T) {
 			}
 		} else if c.GetClient().Transport != ot {
 			t.Errorf("Expected transport to match existing otelhttp.Transport directly")
+		}
+	})
+
+	t.Run("SetTransport with CircuitBreaker avoids double wrapping", func(t *testing.T) {
+		cbClient := New(WithCircuitBreaker())
+		base := &testCustomRoundTripper{}
+		cbClient.SetTransport(base)
+		firstWrapped := cbClient.GetClient().Transport
+
+		cbClient.SetTransport(firstWrapped)
+		secondWrapped := cbClient.GetClient().Transport
+
+		if cbClient.baseTransport != base {
+			t.Fatalf("Expected baseTransport to remain original custom RoundTripper, got %T", cbClient.baseTransport)
+		}
+
+		resp, reqErr := cbClient.R().Get(ts.URL)
+		if reqErr != nil {
+			t.Fatalf("Expected no error, got: %v", reqErr)
+		}
+		if resp.StatusCode() != http.StatusOK {
+			t.Errorf("Expected status 200, got %d", resp.StatusCode())
+		}
+		if cbClient.CircuitBreakerManager().Count() != 1 {
+			t.Errorf("Expected exactly 1 circuit breaker entry, got %d", cbClient.CircuitBreakerManager().Count())
+		}
+		if secondWrapped == nil {
+			t.Fatal("Expected non-nil wrapped transport")
 		}
 	})
 }

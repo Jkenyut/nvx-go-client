@@ -4,6 +4,8 @@ import (
 	"context"
 	"net/http"
 	"strings"
+
+	"github.com/Jkenyut/nvx-go-helper/cryptoutil"
 )
 
 type contextKey struct {
@@ -76,6 +78,38 @@ func NormalizePath(path string) string {
 	return b.String()
 }
 
+func extractServerHost(req *http.Request) string {
+	if req == nil {
+		return ""
+	}
+	if req.Host != "" {
+		return req.Host
+	}
+	if req.URL != nil {
+		return req.URL.Host
+	}
+	return ""
+}
+
+func extractRouteTemplate(req *http.Request) string {
+	if req == nil {
+		return "/"
+	}
+	// Layer 1: Check explicit context pattern
+	if pattern, ok := RoutePatternFromContext(req.Context()); ok {
+		if !strings.HasPrefix(pattern, "/") {
+			return "/" + pattern
+		}
+		return pattern
+	}
+	// Layer 2: Heuristic path normalization
+	path := ""
+	if req.URL != nil {
+		path = req.URL.Path
+	}
+	return NormalizePath(path)
+}
+
 // DefaultRouteKey generates a canonical route key in the form:
 //
 //	"METHOD host/normalized_path"
@@ -91,33 +125,13 @@ func DefaultRouteKey(req *http.Request) string {
 		method = http.MethodGet
 	}
 
-	host := req.Host
-	if host == "" && req.URL != nil {
-		host = req.URL.Host
-	}
-
-	// Layer 1: Check explicit context pattern
-	if pattern, ok := RoutePatternFromContext(req.Context()); ok {
-		if !strings.HasPrefix(pattern, "/") {
-			pattern = "/" + pattern
-		}
-		if host != "" {
-			return method + " " + host + pattern
-		}
-		return method + " " + pattern
-	}
-
-	// Layer 2: Heuristic path normalization
-	path := ""
-	if req.URL != nil {
-		path = req.URL.Path
-	}
-	normalized := NormalizePath(path)
+	host := extractServerHost(req)
+	template := extractRouteTemplate(req)
 
 	if host != "" {
-		return method + " " + host + normalized
+		return method + " " + host + template
 	}
-	return method + " " + normalized
+	return method + " " + template
 }
 
 // isDynamicParam checks whether a path segment is a dynamic parameter.
@@ -133,7 +147,7 @@ func isDynamicParam(seg string) bool {
 	}
 
 	// Check UUID: 36 chars with dashes
-	if isUUID(seg) {
+	if len(seg) == 36 && cryptoutil.IsValid(seg) {
 		return true
 	}
 
@@ -154,26 +168,8 @@ func isNumeric(s string) bool {
 	if s == "" {
 		return false
 	}
-	for i := 0; i < len(s); i++ {
+	for i := range len(s) {
 		if s[i] < '0' || s[i] > '9' {
-			return false
-		}
-	}
-	return true
-}
-
-func isUUID(s string) bool {
-	if len(s) != 36 {
-		return false
-	}
-	if s[8] != '-' || s[13] != '-' || s[18] != '-' || s[23] != '-' {
-		return false
-	}
-	for i := 0; i < len(s); i++ {
-		if i == 8 || i == 13 || i == 18 || i == 23 {
-			continue
-		}
-		if !isHexByte(s[i]) {
 			return false
 		}
 	}
@@ -186,7 +182,7 @@ func isHexID(s string) bool {
 	if l != 24 && l != 32 && l != 40 && l != 64 {
 		return false
 	}
-	for i := 0; i < l; i++ {
+	for i := range l {
 		if !isHexByte(s[i]) {
 			return false
 		}
@@ -200,7 +196,7 @@ func isULIDOrKSUID(s string) bool {
 	if l != 26 && l != 27 {
 		return false
 	}
-	for i := 0; i < l; i++ {
+	for i := range l {
 		c := s[i]
 		isUpperAlnum := (c >= '0' && c <= '9') || (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z')
 		if !isUpperAlnum {
