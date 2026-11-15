@@ -1,12 +1,17 @@
 package client
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 	"time"
+
+	"go.opentelemetry.io/otel/trace"
 )
 
 type recordingStore struct {
@@ -161,4 +166,92 @@ func TestClient_WithLogStore_DirectOption(t *testing.T) {
 	if store.entries[0].StatusCode != http.StatusCreated {
 		t.Errorf("expected 201 Created, got %d", store.entries[0].StatusCode)
 	}
+}
+
+func TestConsoleStore_TraceAndSpanID(t *testing.T) {
+	traceID, err := trace.TraceIDFromHex("4bf92f3577b34da6a3ce929d0e0e4736")
+	if err != nil {
+		t.Fatalf("invalid trace ID: %v", err)
+	}
+	spanID, err := trace.SpanIDFromHex("00f067aa0ba902b7")
+	if err != nil {
+		t.Fatalf("invalid span ID: %v", err)
+	}
+
+	spanCtx := trace.NewSpanContext(trace.SpanContextConfig{
+		TraceID:    traceID,
+		SpanID:     spanID,
+		TraceFlags: trace.FlagsSampled,
+	})
+	tracedCtx := trace.ContextWithSpanContext(context.Background(), spanCtx)
+
+	t.Run("logs trace_id and span_id from context", func(t *testing.T) {
+		var buf bytes.Buffer
+		logger := slog.New(slog.NewJSONHandler(&buf, nil))
+		store := NewConsoleStore(logger)
+
+		entry := &AuditLog{ID: "trace-1", Method: "GET", FullURL: "https://example.com/health"}
+		if saveErr := store.Save(tracedCtx, entry); saveErr != nil {
+			t.Fatalf("unexpected error: %v", saveErr)
+		}
+
+		var logged map[string]any
+		if unmarshalErr := json.Unmarshal(buf.Bytes(), &logged); unmarshalErr != nil {
+			t.Fatalf("failed to unmarshal log output: %v (raw: %s)", unmarshalErr, buf.String())
+		}
+		if got := logged["trace_id"]; got != traceID.String() {
+			t.Errorf("expected trace_id %q, got %v", traceID.String(), got)
+		}
+		if got := logged["span_id"]; got != spanID.String() {
+			t.Errorf("expected span_id %q, got %v", spanID.String(), got)
+		}
+	})
+
+	t.Run("omits trace_id and span_id when absent", func(t *testing.T) {
+		var buf bytes.Buffer
+		logger := slog.New(slog.NewJSONHandler(&buf, nil))
+		store := NewConsoleStore(logger)
+
+		entry := &AuditLog{ID: "trace-2", Method: "GET", FullURL: "https://example.com/health"}
+		if saveErr := store.Save(context.Background(), entry); saveErr != nil {
+			t.Fatalf("unexpected error: %v", saveErr)
+		}
+
+		var logged map[string]any
+		if unmarshalErr := json.Unmarshal(buf.Bytes(), &logged); unmarshalErr != nil {
+			t.Fatalf("failed to unmarshal log output: %v (raw: %s)", unmarshalErr, buf.String())
+		}
+		if _, exists := logged["trace_id"]; exists {
+			t.Errorf("expected trace_id to be omitted, got %v", logged["trace_id"])
+		}
+		if _, exists := logged["span_id"]; exists {
+			t.Errorf("expected span_id to be omitted, got %v", logged["span_id"])
+		}
+	})
+
+	t.Run("recordAuditLog populates TraceID and SpanID on entry", func(t *testing.T) {
+		ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusOK)
+		}))
+		defer ts.Close()
+
+		store := &recordingStore{}
+		c := New(
+			WithBaseURL(ts.URL),
+			WithLogStore(store),
+		)
+
+		if _, reqErr := c.R().SetContext(tracedCtx).Get("/trace"); reqErr != nil {
+			t.Fatalf("request failed: %v", reqErr)
+		}
+		if len(store.entries) != 1 {
+			t.Fatalf("expected 1 entry, got %d", len(store.entries))
+		}
+		if store.entries[0].TraceID != traceID.String() {
+			t.Errorf("expected entry.TraceID %q, got %q", traceID.String(), store.entries[0].TraceID)
+		}
+		if store.entries[0].SpanID != spanID.String() {
+			t.Errorf("expected entry.SpanID %q, got %q", spanID.String(), store.entries[0].SpanID)
+		}
+	})
 }

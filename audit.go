@@ -75,6 +75,8 @@ type AuditLog struct {
 	ServiceName     string         `json:"service_name,omitempty"`
 	UserAgent       string         `json:"user_agent"`
 	ErrorMessage    string         `json:"error_message,omitempty"`
+	TraceID         string         `json:"trace_id,omitempty"`
+	SpanID          string         `json:"span_id,omitempty"`
 }
 
 // AuditConfig holds configuration for outbound request and response audit logging via log/slog.
@@ -492,6 +494,15 @@ func recordAuditLog(cfg *AuditConfig, req *resty.Request, resp *resty.Response, 
 		attrs = append(attrs, slog.String("error", errorMessage))
 	}
 
+	traceID := telemetry.TraceID(ctx)
+	spanID := telemetry.SpanID(ctx)
+	if traceID != "" {
+		attrs = append(attrs, slog.String("trace_id", traceID))
+	}
+	if spanID != "" {
+		attrs = append(attrs, slog.String("span_id", spanID))
+	}
+
 	shouldEmitSlog := cfg.Logger.Enabled(ctx, level)
 	if cs, ok := cfg.Store.(*ConsoleStore); ok && cs != nil {
 		if cs.logger == cfg.Logger || (cs.logger == nil && cfg.Logger == slog.Default()) {
@@ -530,6 +541,8 @@ func recordAuditLog(cfg *AuditConfig, req *resty.Request, resp *resty.Response, 
 			ServiceName:     cfg.ServiceName,
 			UserAgent:       userAgent,
 			ErrorMessage:    errorMessage,
+			TraceID:         traceID,
+			SpanID:          spanID,
 		}
 
 		timeout := cfg.LogStoreTimeout

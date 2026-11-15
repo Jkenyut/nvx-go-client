@@ -1,9 +1,12 @@
 package client
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"log/slog"
+
+	"github.com/Jkenyut/nvx-go-telemetry/telemetry"
 )
 
 // LogStore defines the interface for persisting outbound audit log entries.
@@ -37,7 +40,8 @@ func (c *ConsoleStore) Save(ctx context.Context, entry *AuditLog) error {
 	if l == nil {
 		l = slog.Default()
 	}
-	l.InfoContext(ctx, "outbound audit log",
+	attrs := make([]slog.Attr, 0, 21)
+	attrs = append(attrs,
 		slog.String("id", entry.ID),
 		slog.String("service_name", entry.ServiceName),
 		slog.String("method", entry.Method),
@@ -58,6 +62,13 @@ func (c *ConsoleStore) Save(ctx context.Context, entry *AuditLog) error {
 		slog.String("error_message", entry.ErrorMessage),
 		slog.String("request_id", entry.RequestID),
 	)
+	if traceID := cmp.Or(entry.TraceID, telemetry.TraceID(ctx)); traceID != "" {
+		attrs = append(attrs, slog.String("trace_id", traceID))
+	}
+	if spanID := cmp.Or(entry.SpanID, telemetry.SpanID(ctx)); spanID != "" {
+		attrs = append(attrs, slog.String("span_id", spanID))
+	}
+	l.LogAttrs(ctx, slog.LevelInfo, "outbound audit log", attrs...)
 	return nil
 }
 
