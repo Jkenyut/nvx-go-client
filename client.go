@@ -33,6 +33,7 @@ type Client struct {
 	otelOpts         []otelhttp.Option
 	cbManager        *CircuitBreakerManager
 	auditCfg         *AuditConfig
+	propagateKeys    *HeaderKeys
 	baseTransport    http.RoundTripper
 	wrappedTransport http.RoundTripper
 }
